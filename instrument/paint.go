@@ -776,14 +776,16 @@ func paintLyric(cv *canvas, cfg Config, s snapshot, night bool, applyT func(x, y
 	left := 90.0
 	top := 18.0
 
-	// 行高（歌名与下一行按用户要求放大一档；当前行保持 42 不动）
-	titleFS := 24.0 * k
-	titleLH := 30.0 * k
+	// 三档字号：当前行 42 是基准，歌名 28（≈0.67×）、下一行 34（≈0.81×当前行）。
+	// 原来歌名 24、下一行 26，实车抓帧笔画高只有 22 / 23px——两行小字糊成一片，
+	// 而且下一行比歌名还小一号、层次是反的。现在读起来是「歌名 < 下一句 < 正在唱」。
+	titleFS := 28.0 * k
+	titleLH := 34.0 * k
 	curFS := 42.0 * k
 	curLH := 52.0 * k
-	nextFS := 26.0 * k
-	nextLH := 32.0 * k
-	gap := 16.0 * k // 块间间距（略收，给放大后的下一行腾空间）
+	nextFS := 34.0 * k
+	nextLH := 40.0 * k
+	gap := 16.0 * k // 块间间距
 
 	// 歌名 + 歌手
 	title := strings.TrimSpace(s.lyric.title)
