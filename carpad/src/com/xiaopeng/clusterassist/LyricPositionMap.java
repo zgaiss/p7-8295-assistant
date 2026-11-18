@@ -49,6 +49,8 @@ public class LyricPositionMap extends View {
     private boolean dragging = false;
     private float grabX, grabY; // 按下点相对块左上角的偏移（逻辑坐标）
     private boolean showRange = true;
+    /** 锁定后不响应拖动：onTouch 直接放行，页面照常滚动 */
+    private boolean locked = false;
     private OnPosChanged listener;
 
     public LyricPositionMap(Context c) {
@@ -79,6 +81,20 @@ public class LyricPositionMap extends View {
 
     public void setListener(OnPosChanged l) { listener = l; }
     public void setShowRange(boolean show) { showRange = show; invalidate(); }
+
+    /**
+     * 锁定 / 解锁拖动。
+     * 锁定期间 onTouchEvent 直接返回 false，不消费事件也不抢父容器拦截权——
+     * 否则用户在画布上竖着滑想翻页，会被当成拖动把歌词挪走。
+     */
+    public void setLocked(boolean v) {
+        if (locked == v) return;
+        locked = v;
+        dragging = false;
+        invalidate();
+    }
+
+    public boolean isLocked() { return locked; }
 
     /** 设置位置（自动钳制到屏内），dx/dy 为仪表绝对像素偏移。 */
     /** 设置歌词块整体缩放：包围盒与可达范围一起变，越界的 dx/dy 自动钳回来 */
@@ -138,8 +154,10 @@ public class LyricPositionMap extends View {
             cv.drawRoundRect(r, 10 * dpi, 10 * dpi, rangeFill);
         }
 
-        // 当前歌词块
+        // 当前歌词块：锁定态用灰色描边，跟"能拖"的绿色一眼区分
         map(r, dx, dy, dx + boxW, dy + boxH);
+        blockEdge.setColor(locked ? 0xFF5C6A76 : 0xFF2BD88F);
+        accent.setColor(locked ? 0xFF5C6A76 : 0xFF2BD88F);
         cv.drawRoundRect(r, 10 * dpi, 10 * dpi, blockFill);
         cv.drawRoundRect(r, 10 * dpi, 10 * dpi, blockEdge);
 
@@ -157,8 +175,8 @@ public class LyricPositionMap extends View {
         String coord = "X " + dx + "   Y " + dy;
         float tw = text.measureText(coord);
         cv.drawText(coord, r.left + 16 * dpi, r.bottom - 12 * dpi, text);
-        cv.drawText("拖动绿色框调整位置", w - hint.measureText("拖动绿色框调整位置") - 14 * dpi,
-                h - 10 * dpi, hint);
+        String tip = locked ? "已锁定 · 到上方开关解锁后可拖动" : "拖动绿色框调整位置";
+        cv.drawText(tip, w - hint.measureText(tip) - 14 * dpi, h - 10 * dpi, hint);
     }
 
     private void region(Canvas cv, String label, float x0, float y0, float x1, float y1) {
@@ -169,6 +187,8 @@ public class LyricPositionMap extends View {
 
     @Override
     public boolean onTouchEvent(MotionEvent ev) {
+        // 锁定：不消费事件、也不抢父容器的拦截权，页面能正常滚动，位置一动不动
+        if (locked) return false;
         float px = ev.getX(), py = ev.getY();
         switch (ev.getActionMasked()) {
             case MotionEvent.ACTION_DOWN: {
