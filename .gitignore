@@ -1,0 +1,24 @@
+# ── 构建产物 ─────────────────────────────────────────
+# build-all.sh / build-mac.sh 的输出目录（仪表二进制 + APK）
+dist/
+
+# carpad/build.sh 的中间产物（aapt2 / javac / d8 输出）
+carpad/build/
+
+# 运行时从 fonts/ 加载的完整普惠体（8.9MB）。构建时用的是 embed 的
+# cjk.ttf 子集，这个只在设备上补齐中文字形，按需自备，不入库。
+instrument/fonts/Alibaba-PuHuiTi-Regular.ttf
+
+# ── 本地工具链（体积大，按需自备，见 README 第二节）──
+tools/jdk/
+tools/bt/
+tools/plat/
+tools/go/
+tools/*.zip
+
+# ── 系统与编辑器 ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,100 @@
+#!/bin/sh
+# p7assist 控制脚本（仪表本地）
+#   p7assistctl start|stop|restart|status|log [n]|upgrade
+D=/data/p7assist
+BIN=$D/p7assist
+NEW=$D/p7assist.new
+LOG=$D/log/hud.log
+
+running() {
+    [ -n "$(pidof p7assist)" ]
+}
+
+case "$1" in
+start)
+    if running; then
+        echo "p7assist: already running (pid $(pidof p7assist))"
+        exit 0
+    fi
+    [ -x "$BIN" ] || { echo "p7assist: binary missing: $BIN"; exit 1; }
+    rm -f $D/stop
+    mkdir -p $D/log
+    echo "p7assist: starting..."
+    setsid $BIN daemon >>$D/log/console.log 2>&1 </dev/null &
+    sleep 3
+    if running; then
+        echo "p7assist: STARTED pid $(pidof p7assist)"
+    else
+        echo "p7assist: FAILED"
+        tail -8 $D/log/console.log 2>/dev/null
+    fi
+    ;;
+stop)
+    if ! running; then
+        echo "p7assist: not running"
+        exit 0
+    fi
+    touch $D/stop
+    i=0
+    while running && [ $i -lt 12 ]; do
+        sleep 1
+        i=$((i+1))
+    done
+    if running; then
+        kill $(pidof p7assist) 2>/dev/null
+        sleep 1
+        # SIGTERM 没送走（卡在 IO 等）就只能 kill -9，但那样 daemon 里的
+        # 「清零 fb1 + FBIOBLANK 关层」不会执行，画面会残留在屏幕上。
+        # 这里补一次 cleanup，保证停止后立刻回到原厂显示。
+        if running; then
+            kill -9 $(pidof p7assist) 2>/dev/null
+            sleep 1
+            [ -x "$BIN" ] && $BIN cleanup >/dev/null 2>&1
+        fi
+        echo "p7assist: killed"
+    else
+        echo "p7assist: STOPPED (fg layer restored)"
+    fi
+    rm -f $D/stop
+    ;;
+restart)
+    $0 stop
+    sleep 1
+    $0 start
+    ;;
+upgrade)
+    # 车机端把新二进制传成 p7assist.new，这里校验并热替换
+    [ -s "$NEW" ] || { echo "p7assist: no $NEW"; exit 1; }
+    head -c 4 "$NEW" | grep -q ELF || { echo "p7assist: $NEW 不是 ELF，拒绝替换"; exit 1; }
+    chmod 755 "$NEW"
+    if running; then
+        # 守护进程会自己发现 p7assist.new 并 exec，不需要重启
+        echo "p7assist: daemon 将自动升级"
+    else
+        mv -f "$NEW" "$BIN"
+        chmod 755 "$BIN"
+        echo "p7assist: 已替换（未运行，下次启动生效）"
+    fi
+    ;;
+status)
+    if running; then
+        echo "p7assist : running pid $(pidof p7assist)"
+    else
+        echo "p7assist : not running"
+    fi
+    echo "--- config.json"
+    cat $D/config.json 2>/dev/null
+    echo "--- status.json"
+    cat $D/status.json 2>/dev/null
+    echo
+    echo "--- fb1"
+    echo "stride=$(cat /sys/class/graphics/fb1/stride 2>/dev/null) vsize=$(cat /sys/class/graphics/fb1/virtual_size 2>/dev/null)"
+    ;;
+log)
+    n=${2:-40}
+    tail -n "$n" $LOG 2>/dev/null || echo "(无日志)"
+    ;;
+*)
+    echo "usage: $0 start|stop|restart|status|log [n]|upgrade"
+    ;;
+esac
