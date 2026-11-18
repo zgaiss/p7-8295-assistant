@@ -33,6 +33,8 @@ public class Prefs {
     public boolean lyricHideOnPause = false;
     /** 左上角歌词块内文字居中排布（默认左对齐） */
     public boolean lyricCenter = false;
+    /** 锁定歌词位置：锁定后画布上无法拖动，防止翻设置页时误触改位置。纯车机端状态，不下发仪表 */
+    public boolean lyricLock = false;
     /** 充电时用整屏充电页替代原厂充电界面 */
     public boolean chargePage = false;
     /** 充电页调试：驻车/未插枪也强制显示充电页，用演示数值 */
@@ -93,6 +95,7 @@ public class Prefs {
         p.lyricBg = sp.getBoolean("lyricBg", false);
         p.lyricHideOnPause = sp.getBoolean("lyricHideOnPause", false);
         p.lyricCenter = sp.getBoolean("lyricCenter", false);
+        p.lyricLock = sp.getBoolean("lyricLock", false);
         p.chargePage = sp.getBoolean("chargePage", false);
         p.chargeDebug = sp.getBoolean("chargeDebug", false);
         p.chargeWarnPreview = sp.getBoolean("chargeWarnPreview", false);
@@ -139,6 +142,7 @@ public class Prefs {
         e.putBoolean("lyricBg", lyricBg);
         e.putBoolean("lyricHideOnPause", lyricHideOnPause);
         e.putBoolean("lyricCenter", lyricCenter);
+        e.putBoolean("lyricLock", lyricLock);
         e.putBoolean("chargePage", chargePage);
         e.putBoolean("chargeDebug", chargeDebug);
         e.putBoolean("chargeWarnPreview", chargeWarnPreview);
@@ -169,7 +173,7 @@ public class Prefs {
     public Prefs copy() {
         Prefs p = new Prefs();
         p.master = master; p.tpmsP = tpmsP; p.tpmsD = tpmsD; p.volt = volt; p.cabin = cabin;
-        p.bsd = bsd; p.nav = nav; p.lyric = lyric; p.lyricBottom = lyricBottom; p.lyricBg = lyricBg; p.lyricHideOnPause = lyricHideOnPause; p.lyricCenter = lyricCenter; p.chargePage = chargePage; p.chargeDebug = chargeDebug; p.chargeWarnPreview = chargeWarnPreview; p.chargeStatePreview = chargeStatePreview; p.tl = tl;
+        p.bsd = bsd; p.nav = nav; p.lyric = lyric; p.lyricBottom = lyricBottom; p.lyricBg = lyricBg; p.lyricHideOnPause = lyricHideOnPause; p.lyricCenter = lyricCenter; p.lyricLock = lyricLock; p.chargePage = chargePage; p.chargeDebug = chargeDebug; p.chargeWarnPreview = chargeWarnPreview; p.chargeStatePreview = chargeStatePreview; p.tl = tl;
         p.tlDemo = tlDemo;
         p.tpmsHi = tpmsHi; p.tripDist = tripDist; p.tripTime = tripTime;
         p.tripSpeed = tripSpeed; p.tripKwh = tripKwh; p.debug = debug;

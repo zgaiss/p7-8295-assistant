@@ -54,6 +54,8 @@ public class MainActivity extends Activity {
     private LinearLayout pageLog;
     private LyricPositionMap lyricMap;
     private TextView tvLyricPos, tvLyricPosState, tvLyricScale, tvTlDiag;
+    /** 「恢复默认位置」按钮：锁定歌词位置时置灰，避免绕过锁定 */
+    private TextView btnLyricReset;
     private TextView btnStart, btnStop;
 
     private PillSwitch swMaster, swTpmsP, swTpmsD, swBsd, swTpmsHi, swCabin, swVolt, swNav, swLyric,
@@ -643,6 +645,17 @@ public class MainActivity extends Activity {
         tvLyricPosState.setTextColor(ui.tagWarn);
         p.addView(tvLyricPosState);
 
+        // 锁定位置：调好之后，翻设置页时手指在画布上滑一下就会把歌词挪走，且当场推到仪表。
+        // 这个开关只关掉"改位置"的入口，仪表上照常显示；纯车机端状态，不写进 config.json。
+        p.addView(toggle("锁定歌词位置", "", "锁定后无法在下方画布上拖动歌词，防止翻页时误触；仪表显示不受影响", prefs.lyricLock,
+                new Setter() { @Override public void set(boolean v) {
+                    prefs.lyricLock = v;
+                    if (lyricMap != null) lyricMap.setLocked(v);
+                    applyLyricLockUi();
+                    refreshLyricPosState();
+                    toast(v ? "歌词位置已锁定，画布不可拖动" : "歌词位置已解锁，可以拖动");
+                } }));
+
         // 背景卡片：颜色取自车机中控「正在播放条」下方那层（夜 #191A1F / 昼 #DFE3EB），
         // 仪表端按当前昼夜自动挑，用户不用管。
         p.addView(toggle("歌词背景", "", "在歌词块后面加一层底色卡片，颜色跟随车机播放条，昼夜自动切换", prefs.lyricBg,
@@ -714,6 +727,7 @@ public class MainActivity extends Activity {
 
         lyricMap.setScale(prefs.lyricScale);
         lyricMap.setPos(prefs.lyricPosX, prefs.lyricPosY);
+        lyricMap.setLocked(prefs.lyricLock);
         lyricMap.setListener(new LyricPositionMap.OnPosChanged() {
             @Override public void onChanged(int x, int y, boolean dragging) {
                 prefs.lyricPosX = x;
@@ -733,8 +747,13 @@ public class MainActivity extends Activity {
 
         p.addView(ui.sep());
         p.addView(ui.buttonRow(
-                ui.button("恢复默认位置", false, new View.OnClickListener() {
+                btnLyricReset = ui.button("恢复默认位置", false, new View.OnClickListener() {
                     @Override public void onClick(View v) {
+                        // 锁定的意义就是"位置改不了"，这个按钮也必须让路，否则一下就绕过去了
+                        if (prefs.lyricLock) {
+                            toast("歌词位置已锁定，先在上方关掉「锁定歌词位置」");
+                            return;
+                        }
                         prefs.lyricPosX = 0;
                         prefs.lyricPosY = 0;
                         prefs.lyricScale = 1f;
@@ -757,7 +776,15 @@ public class MainActivity extends Activity {
         p.addView(ui.hint("说明：本页只调「歌词显示在下方」关闭时的左上角歌词。"
                 + "若已打开「显示内容 → 歌词显示在下方」，请关掉它再看效果；"
                 + "底部歌词位置固定，不受本页影响。"));
+        applyLyricLockUi();
         return p;
+    }
+
+    /** 锁定态联动：「恢复默认位置」按钮置灰，避免用这个入口绕过锁定改位置 */
+    private void applyLyricLockUi() {
+        if (btnLyricReset == null) return;
+        btnLyricReset.setEnabled(!prefs.lyricLock);
+        btnLyricReset.setAlpha(prefs.lyricLock ? 0.4f : 1f);
     }
 
     /**
@@ -836,6 +863,9 @@ public class MainActivity extends Activity {
             tvLyricPosState.setTextColor(ui.tagWarn);
         } else if (!prefs.lyric) {
             tvLyricPosState.setText("⚠ 当前「歌词」开关已关闭：仪表不显示歌词，请在「显示内容」页打开。");
+            tvLyricPosState.setTextColor(ui.tagWarn);
+        } else if (prefs.lyricLock) {
+            tvLyricPosState.setText("● 歌词已开启，位置已锁定：下方画布不可拖动，关掉「锁定歌词位置」即可调整。");
             tvLyricPosState.setTextColor(ui.tagWarn);
         } else {
             tvLyricPosState.setText("● 歌词已开启，拖动下方歌词框即可调整位置，松手自动生效。");
