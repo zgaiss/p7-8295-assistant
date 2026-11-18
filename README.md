@@ -194,7 +194,7 @@ AGENTS.md          协作规则（Issue / PR / README 同步 / 自查，改动�
 build-all.sh       一键构建（自动适配 macOS / Windows）：测试 → 交叉编译 → 拷入 assets → 打 APK
 carpad/            车机 Android App
 instrument/        仪表端 Go 守护进程
-tools/             addzip.py、gen_bgmap.py 与 testkey/（构建与生成必需）
+tools/             addzip.py、gen_bgmap.py、仪表诊断脚本（icrpc/icrpc_put/probe_card）与 testkey/
 .gitignore         忽略 dist/、carpad/build/、字体、工具链
 ```
 
@@ -273,3 +273,55 @@ remote: - Changes must be made through a pull request.
 ```
 
 提交身份必须是 `zgaiss <187540906+zgaiss@users.noreply.github.com>`，不要带入个人或公司邮箱。
+
+---
+
+## 九、仪表端诊断脚本
+
+`tools/` 下的三个脚本用于**只能在仪表上取证**的场景（底图取色、RGB565 偏色、撕裂、帧率），走 30510 管理通道，不需要登录 shell、不需要 root：
+
+| 脚本 | 用途 |
+|---|---|
+| `icrpc.py` | 下发一条 shell 命令并解码回包（30510 帧头 + protobuf） |
+| `icrpc_put.py` | 在其上做 base64 分块上传：本机连不上仪表 FTP，而 30510 只提供 shell、没有文件传输 opcode，传文件只能这么走 |
+| `probe_card.sh` | 抓一帧（fb0+fb1 合成）拉回本机，打印歌词卡片矩形内的采样色 |
+
+三个脚本只连 `IC_HOST:IC_PORT`，默认 `127.0.0.1:9000`（即下面的中继端口），脚本里不写仪表地址。
+
+### 1. 先起中继
+
+Mac 直连仪表 30510 会被直接关连接，必须经车机转发。本固件的 `/system/bin/busybox` 不可用（`IcRelay.java` 依赖它，所以 App 里的中继在这台车上是坏的），改用 toybox `nc`——它收到连接后会把后面的 COMMAND 当子进程跑，正好用来做转发：
+
+```bash
+adb shell "setsid nc -s 127.0.0.1 -L -p 9000 nc 172.20.1.40 30510 >/dev/null 2>&1 &"
+adb forward tcp:9000 tcp:9000
+```
+
+`-L` 不能和 `-l` 同用（会报 `No 'L' with 'l'`）；`setsid` + `&` 是为了让监听进程不随 adb shell 退出。
+
+用完立刻收掉，不要把这个入口留在车上：
+
+```bash
+adb shell 'P=9000; pkill -f "nc -s 127.0.0.1 -L -p $P"'   # 变量拼接，避免这条命令把自己也匹配掉
+adb forward --remove tcp:9000
+```
+
+### 2. 用法
+
+```bash
+# 只读命令
+python3 tools/icrpc.py 'uname -r; ls -l /data/p7assist'
+
+# 上传：先写 .part，md5 校验通过才 mv 落位，热升级不会读到半个二进制
+python3 tools/icrpc_put.py dist/p7assist /data/p7assist/p7assist.new
+
+# 抓帧看歌词卡片底色（需要本机 python3 + Pillow，产物在 dist/probe/s.png）
+sh tools/probe_card.sh
+```
+
+`probe_card.sh` 抓的是合成帧，实测要 ≥8 秒，脚本里留了 9 秒；采样矩形默认取当前歌词位（`x 1263~1821`、`y 459~599`），换版式后用 `CARD_X0/CARD_X1/CARD_Y0/CARD_Y1` 覆盖。夜间实机一次输出：
+
+```
+卡片矩形 (1263,459)-(1821,599)  10 点平均 #0C0E11 (L=13.8)
+```
+
