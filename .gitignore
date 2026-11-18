@@ -5,6 +5,12 @@ dist/
 # carpad/build.sh 的中间产物（aapt2 / javac / d8 输出）
 carpad/build/
 
+# 在 instrument/ 里直接 go build 会落在当前目录，别让它进库
+/instrument/p7assist
+
+# 已编译的仪表端二进制只从 carpad/assets/p7assist 分发，其余位置一律忽略
+/instrument/p7assist.exe
+
 # 运行时从 fonts/ 加载的完整普惠体（8.9MB）。构建时用的是 embed 的
 # cjk.ttf 子集，这个只在设备上补齐中文字形，按需自备，不入库。
 instrument/fonts/Alibaba-PuHuiTi-Regular.ttf
