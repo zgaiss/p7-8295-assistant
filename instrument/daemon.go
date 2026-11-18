@@ -58,6 +58,10 @@ type box struct {
 
 	// 充电让出：仪表 DBus 的原始读数 + 去抖后的判定结果（状态机在 charge.go）
 	chgS chargeState
+
+	// 控制视频模式进出的充电判定：非对称去抖（进快出慢），跨轮持久。
+	// chg.on 偶发读到 false 不应立刻退出视频模式——那会触发近 6 秒阻塞 + 黑闪。
+	chgOnDeb chgOnDebounce
 }
 
 // pollScreenNight 每 500ms 采样一次原厂画面亮度，带滞回 + 去抖。
@@ -790,7 +794,18 @@ func daemonMain() {
 		bs := b.snap()
 		chgOnNow := (cfg2.Features.ChargePage && bs.chg.on) || cfg2.Features.ChargeDebug
 		gearHiddenNow := bs.gearOK && bs.gear == 3
-		videoMode := cfg2.Enabled && chgOnNow && !gearHiddenNow && videoUsable(dir)
+		wantVideo := cfg2.Enabled && chgOnNow && !gearHiddenNow && videoUsable(dir)
+		// 会话状态机（Issue #7）：进入要满足冷却，退出立即生效但设 5s 冷却。
+		// 这样 chg.on 抖动时不会反复退出重进（每次退出近 6s 阻塞 + 黑闪）。
+		// 唯一合法退出原因是拔枪/停充/挂 R 挡/资源消失——都已体现在 wantVideo。
+		switch {
+		case !videoOn && wantVideo && now.After(videoCoolUntil):
+			videoOn = true
+		case videoOn && !wantVideo:
+			videoOn = false
+			videoCoolUntil = now.Add(5 * time.Second)
+		}
+		videoMode := videoOn
 		if videoMode {
 			startVideo(dir, lg)
 			videoTouched = true
@@ -868,7 +883,14 @@ func daemonMain() {
 			}
 		}
 
-		applyOn(cfg2.Enabled && !hold, screenWhy(cfg2.Enabled, hold))
+		// 视频模式下显式不碰 fb1（Issue #7 ③）：播放器已接管整层，
+		// 这里一旦执行 applyOn 的关层分支就会 clearBox + fbBlank，把播放器画面抹掉。
+		// 之前靠 hold=false 让 applyOn 恰好早退是巧合，不是约束。
+		// 注意不能写成 applyOn(cfg2.Enabled && !hold && !videoMode, ...)——
+		// 那样反而会在进入播放时触发关层分支，播放器就没有层可写了。
+		if !videoMode {
+			applyOn(cfg2.Enabled && !hold, screenWhy(cfg2.Enabled, hold))
+		}
 
 		// 状态文件 2s 一次
 		if now.Sub(lastStatus) > 2*time.Second {
@@ -882,6 +904,17 @@ func daemonMain() {
 
 		// 视频模式：动画和文字都由播放器那侧合成，本进程这一轮完全不碰 fb1
 		if videoMode {
+			// ⑦ 缩放动画时钟即便在视频模式也要推进（Issue #7）：
+			// tAnim 供文字层 overlay 的警示条轮播使用；原实现把它放在本 continue
+			// 之后，导致播放期间 tAnim 冻结、警示条不转。这里单独推进它。
+			vs := b.snap()
+			vtarget := 0.0
+			if vs.speedOK && vs.speed >= cfg2.Zoom.Speed {
+				vtarget = 1.0
+			}
+			vdt := float64(now.Sub(lastT)) / float64(time.Millisecond)
+			lastT = now
+			tAnim = stepT(tAnim, vtarget, vdt, cfg2.Zoom.Ms)
 			continue
 		}
 

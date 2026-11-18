@@ -80,7 +80,20 @@ func (b *box) pollChargePage(c *busCtx) {
 	if okDur && dur >= 0 && dur < 10000 {
 		ci.durMin = int(dur)
 	}
-	ci.on = ci.cur >= chgCurMinA || (okMcu && (mcu == mcuChargingA || mcu == mcuChargingB))
+	// 充电中判定走非对称去抖（进快出慢），避免 DBus 偶发超时把 chg.on 读成 false
+	// 而误退视频模式——那会带来约 6 秒渲染阻塞 + 一次黑闪（Issue #7 主因）。
+	// 电流数组读不到视为不可信；桩状态读不到时看电流；两者都读不到时保持上次值。
+	prevOn := b.s.chg.on
+	curOK := okCur && len(cur) > 0
+	switch {
+	case !curOK && !okMcu:
+		// 两条关键输入都读不到：本轮不可信，保持上一次，绝不推断成"未充电"
+		ci.on = prevOn
+	default:
+		raw := (curOK && ci.cur >= chgCurMinA) ||
+			(okMcu && (mcu == mcuChargingA || mcu == mcuChargingB))
+		ci.on = b.chgOnDeb.step(raw, chgOnUpN, chgOnDownN)
+	}
 	ci.ok = okMcu || okGun || okSt
 
 	// 车辆侧判断量（属性名来自 dbus_props.txt 的内省结果，不是猜的）

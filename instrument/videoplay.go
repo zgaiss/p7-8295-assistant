@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 // 充电页"本地播放视频"模式（对照《充电动画投仪表_源码交付说明》v1.0.35 的做法）。
@@ -44,6 +46,12 @@ var (
 	// 只要它跑过（不管正常退出还是被别人 kill），本进程都必须重新 setFGAttrs，
 	// 否则我们的层会变成不透明黑，把原厂仪表整个盖住（踩过一次，整屏黑）。
 	videoTouched bool
+
+	// 视频模式会话状态（Issue #7）：跨轮持久，退出后带冷却，避免 chg.on 抖动
+	// 造成反复退出/重进（每次退出近 6 秒阻塞 + 黑闪）。
+	videoOn        bool
+	videoCoolUntil time.Time
+
 	// 最近一次写 overlay 的时间（每秒一次就够，文字不会这么快变）
 	videoOvAt time.Time
 )

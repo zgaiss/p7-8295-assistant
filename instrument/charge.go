@@ -31,6 +31,12 @@ const (
 
 	// 去抖：连续 2 次（约 2 秒）一致才切换，插枪/拔枪瞬间不来回开关图层
 	chargeDebounceN = 2
+
+	// 视频模式进出用的非对称去抖（Issue #7）：进 2 轮≈2s，出 10 轮≈10s。
+	// 误退出要付近 6 秒阻塞 + 黑闪，误保持只是多播几秒，故退出阈值远大于进入。
+	chgOnUpN   = 2
+	chgOnDownN = 10
+
 	// 轮询间隔
 	chargePollMS = 1000
 )
@@ -95,6 +101,54 @@ func (d *chgDebounce) step(raw bool, need int) bool {
 	}
 	return d.on
 }
+
+// chgOnDebounce 控制视频模式进出的充电判定去抖，**非对称**：进快出慢。
+//
+// 与 chgDebounce（充电让出，对称 need=2）不同的原因：
+//   - 误退出视频模式的代价是 stopVideo + recoverFG 近 6 秒渲染阻塞 + clearAll 清屏（黑闪）；
+//   - 误保持的代价只是动画多留几秒。两者不对称，所以阈值也必须不对称。
+//
+// up   = 进入所需连续真实次数（默认 2 轮 ≈ 2s）
+// down = 退出所需连续真实次数（默认 10 轮 ≈ 10s）
+// 两者都为 0 代表"本轮数据不可信"：保持上一次结果，绝不推断成未充电——
+// DBus 偶发超时会让电流/桩状态同时读不到，此时翻 false 就会误退视频模式。
+//
+// 纯逻辑、不依赖 box/fb/DBus，PC 上可直接单测（见 chg_on_debounce_test.go）。
+type chgOnDebounce struct {
+	on       bool
+	up, down int
+}
+
+func (d *chgOnDebounce) step(raw bool, up, down int) bool {
+	if !ready2(up, down) {
+		// 双路都读不到（up==down==0）：保持上次，绝不翻转
+		return d.on
+	}
+	if raw == d.on {
+		d.up, d.down = 0, 0
+		return d.on
+	}
+	if raw {
+		d.up++
+		d.down = 0
+		if d.up >= up {
+			d.on, d.up, d.down = true, 0, 0
+		}
+	} else {
+		d.down++
+		d.up = 0
+		if d.down >= down {
+			d.on, d.up, d.down = false, 0, 0
+		}
+	}
+	return d.on
+}
+
+// ready2 报告本轮输入是否可信。up/down 都为 0 = 双路 DBus 都读不到。
+func ready2(up, down int) bool { return up > 0 || down > 0 }
+
+// reset 供资源缺失/会话切换时显式归零，避免上一次会话的残值影响新会话。
+func (d *chgOnDebounce) reset() { d.on, d.up, d.down = false, 0, 0 }
 
 // chargeReader 只抽充电判定用到的两个 getter。
 // *busCtx 天然满足（getI / getAD 都是它现有的方法），测试里换成假实现即可，

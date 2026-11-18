@@ -161,15 +161,21 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
    升级走 `syscall.Exec`（pid 不变、镜像替换），上一代等播放器的 goroutine 消失，播放器退出后没人 `waitpid`。
    启动时用 `reapZombies()`（`Wait4(WNOHANG)`）回收。
 
-5. **电压不能取数组第一个元素**。
+5. **视频模式的进入/退出要"进快出慢 + 会话冷却"**。
+   控制视频模式的 `chg.on` 用的是 `chgOnDebounce`（`charge.go`），**非对称**：进 2 轮（≈2s）、出 10 轮（≈10s），且双路 DBus 都读不到时保持上次值，不推断成"未充电"。
+   原因：误退一次要付 `stopVideo + recoverFG` 近 6 秒渲染阻塞 + `clearAll` 黑闪，误保持只是画面多留几秒，代价不对称。
+   另外 `videoMode` 是跨轮持久的会话状态（`videoOn` + 5s 冷却），不是每帧重算的临时布尔量；视频模式下 `daemon.go` 显式不调用 `applyOn`，绝不碰 fb1，避免关层分支把播放器画面抹掉。
+   `tAnim`（overlay 警示条轮播）在视频模式的 `continue` 之前单独推进，播放期间不会冻结。
+
+6. **电压不能取数组第一个元素**。
    `get_host_echarge_voltage` 返回 `[1, 210.8]`，第一个是标志位，真值在第二个。旧代码取 `[0]` 拿到 1，被阈值挡掉 →
    电压、功率整列显示 `--`。现在遍历取最大值。另外 `get_host_echarge_power` 方法在固件里**不存在**，功率只能 V×A 算。
 
-6. **车机 App 会自动把仪表二进制刷回自己 assets 里的版本**。
+7. **车机 App 会自动把仪表二进制刷回自己 assets 里的版本**。
    `PushService.checkClusterVersion()` 比对 `status.version` 与 APK 的 `versionName`，不一致就推一次。
    所以两边版本号必须完全相同，否则会无限重推。
 
-7. **fb1 是 16bpp，颜色必须按 565 取码并抖动，不能直接用 8bit 值**。
+8. **fb1 是 16bpp，颜色必须按 565 取码并抖动，不能直接用 8bit 值**。
    fb0 是 32bpp（stride 7680），fb1 是 RGB565（stride 3840）——同一块区域跨两个精度不同的平面。
    两个坑都在 `rgb565.go` 里解决：
 
