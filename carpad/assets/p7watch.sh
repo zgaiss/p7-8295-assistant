@@ -1,7 +1,11 @@
 #!/bin/sh
-# 看门狗：常驻监督 p7assist 主进程，一旦退出（含被 SIGKILL / OOM）立即清屏关层，
-# 保证任何异常都不会在仪表上留下残留画面（原厂仪表立即透出）。
-# 由 p7boot.sh 开机拉起；二进制被删除（卸载）时自动退出。
+# 看门狗：监督 p7assist 主进程。主进程不在时先清屏关层（防画面残留），再尝试拉起。
+#
+# 存活判断不能只看一个名字：二进制被改名（例如应急时改成 p7assist.old）后
+# `pidof p7assist` 会落空，看门狗于是每 3 秒清一次屏 —— 表现是「进程在画、
+# fb1 里内容完整、但屏幕全空，reinit 后闪一下又消失」。这类误杀排查成本极高
+# （2026-11-15 就踩了一次），所以这里按多个可能的名字判，且只在确认没有
+# 主进程时才动手。
 D=/data/p7assist
 BIN=$D/p7assist
 PIDF=$D/watch.pid
@@ -18,15 +22,32 @@ fi
 echo $$ > "$PIDF"
 trap 'rm -f "$PIDF"' EXIT
 
+alive() {
+    for n in p7assist p7assist.old p7assistctl; do
+        pidof "$n" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+tries=0
 while :; do
-    if ! pidof p7assist >/dev/null 2>&1; then
+    if ! alive; then
         if [ -x "$BIN" ]; then
-            echo "$(date '+%F %T') p7assist 退出，执行 cleanup 兜底" >> "$D/log/watch.log"
+            echo "$(date '+%F %T') 主进程不在，cleanup 兜底" >> "$D/log/watch.log"
             "$BIN" cleanup >>"$D/log/watch.log" 2>&1
+            # cleanup 只清屏不启动，这里补上拉起；连续失败 5 次后停手，避免刷屏
+            if [ "$tries" -lt 5 ]; then
+                tries=$((tries+1))
+                echo "$(date '+%F %T') 尝试拉起（第 $tries 次）" >> "$D/log/watch.log"
+                setsid "$BIN" daemon >>"$D/log/console.log" 2>&1 </dev/null &
+                sleep 3
+            fi
         else
             echo "$(date '+%F %T') 二进制不存在，看门狗退出" >> "$D/log/watch.log"
             break
         fi
+    else
+        tries=0
     fi
     sleep 3
 done

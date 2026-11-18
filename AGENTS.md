@@ -133,8 +133,10 @@ Agent 接到任务时若没有对应 Issue，**应先建 Issue 并把编号回�
 
 ## 4. 提交前必须自检
 
-- [ ] **构建通过**：`sh build-all.sh` 或至少 `sh carpad/build-mac.sh` / `sh carpad/build.sh` 跑通
-- [ ] **Go 侧静态检查**：`cd instrument && GOOS=linux GOARCH=arm GOARM=7 go vet ./...` 无报错（darwin 直接 vet 必失败，见 README）
+- [ ] **构建通过**：`sh build-all.sh`（按主机自动选 `build.sh` / `build-mac.sh`，缺 JDK/SDK 会在覆盖 assets 之前就报错）
+- [ ] **Go 侧检查**：`cd instrument && go test ./...` 通过（纯逻辑用例在主机平台跑）；改到 `fb.go`/`daemon.go` 这类 Linux-only 代码时，再跑
+      `CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go vet -unsafeptr=false ./...`
+      —— `fb.go` 有 5 处 `unsafe.Pointer` 是刻意为之（framebuffer 映射），不加 `-unsafeptr=false` 会误报
 - [ ] **无敏感信息**：不新增签名私钥、口令、内网 IP、设备序列号、个人邮箱、访问令牌
 - [ ] **无构建产物**：`dist/`、`carpad/build/`、`analysis/`、`*.apk`、`*.zip`、大体积工具链都不入库
 - [ ] **版本号三处一致**（见第 9 节）

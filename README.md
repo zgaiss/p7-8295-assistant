@@ -17,7 +17,29 @@
 
 ## 二、构建
 
-### 1. 车机 APK
+### 1. 一键构建（推荐）
+
+```bash
+sh build-all.sh
+# 产物：dist/P7仪表助手-原生版.apk
+#       dist/仪表端/{p7assist,p7assistctl,p7boot.sh,p7watch.sh,install-autostart.sh,uninstall-autostart.sh}
+```
+
+脚本按主机自动选择打包方式，并在动手前先做前置检查（缺 JDK / Android SDK 会直接报错，**不会**先把 `carpad/assets/` 覆盖掉再失败）：
+
+| 主机 `uname -s` | 打包脚本 | 签名 |
+|---|---|---|
+| `Darwin` | `carpad/build-mac.sh` | `tools/testkey` |
+| `MINGW*` / `MSYS*` / `CYGWIN*` | `carpad/build.sh` | `carpad/p7.keystore`（缺则自动生成） |
+| 其他（含 Linux） | 不自动分派，会给出手动两步的命令 | — |
+
+流程：`go test ./...`（在主机平台跑纯逻辑用例）→ 交叉编译 `linux/arm` → 拷进 `carpad/assets/` → 打包签名。
+
+> 构建会覆盖被跟踪的 `carpad/assets/p7assist`（以及几个自启脚本）。这是有意的——APK 里带的就是刚编出来的二进制。提交前如不想带上新二进制，`git checkout -- carpad/assets/p7assist` 还原即可。
+
+### 2. 只打车机 APK
+
+**Windows**（调用 `aapt2.exe`/`d8.bat`）：
 
 ```bash
 cd carpad
@@ -25,7 +47,7 @@ sh build.sh
 # 产物：../dist/P7仪表助手-原生版.apk
 ```
 
-`build.sh` 依赖同级的 `../tools/`：
+依赖同级的 `../tools/`：
 
 ```
 tools/jdk/<jdk-17>/bin/{java,javac,keytool}
@@ -34,9 +56,7 @@ tools/plat/<platform>/android.jar
 tools/testkey/{testkey.pk8,testkey.x509.pem}   # AOSP testkey，车机信任
 ```
 
-版本号写在 `build.sh` 的 `--version-code/--version-name`，**必须与 `instrument/config.go` 的 `appVersion`、`build-mac.sh` 的同名字段完全一致**（原因见第四节第 6 条）。
-
-`build.sh` 是 Windows 版（调用 `aapt2.exe`/`d8.bat` 等）。**macOS 用 `build-mac.sh`**，流程相同，差别只有工具路径无 `.exe` 后缀、JDK 走 `Contents/Home`，以及**签名统一用 `tools/testkey`（AOSP testkey）而不是 `carpad/p7.keystore`**：
+**macOS**：
 
 ```bash
 cd carpad
@@ -44,11 +64,13 @@ sh build-mac.sh
 # 产物：../dist/P7仪表助手-原生版.apk
 ```
 
+流程与 `build.sh` 相同，差别只有工具路径无 `.exe` 后缀、JDK 走 `Contents/Home`，以及**签名统一用 `tools/testkey`（AOSP testkey）而不是 `carpad/p7.keystore`**。SDK 默认取 `~/Library/Android/sdk`，可用 `ANDROID_SDK_ROOT` 覆盖。
+
 两条脚本产出的文件名都是 `P7仪表助手-原生版.apk`；对外发布时重命名为 `P7仪表助手_v<版本>_充电视频版.apk`（与本文标题、首段一致）。`dist/` 目录由脚本自动创建。
 
-> ⚠️ `build-all.sh`（一键构建）目前末尾固定调用 `build.sh`，即 **Windows 版**。在 macOS 上执行会在打包这一步失败（此时 `carpad/assets/p7assist` 已被覆盖），请直接分两步跑：先编仪表端，再 `sh build-mac.sh`。修复计划见 Issue #4。
+版本号写在 `build.sh` 的 `--version-code/--version-name`，**必须与 `instrument/config.go` 的 `appVersion`、`build-mac.sh` 的同名字段完全一致**（原因见第四节第 6 条）。
 
-### 2. 仪表端二进制
+### 3. 只编仪表端二进制
 
 ```bash
 cd instrument
@@ -57,6 +79,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
 ```
 
 产物 `p7assist` 需要放进 `carpad/assets/p7assist` 再打 APK——APK 启动后会自动比对仪表版本并推送，否则仪表会一直跑旧二进制。
+
+`instrument/` 里的纯逻辑（状态推导、排版、预览渲染）与 Linux-only 代码是分开的：`daemon.go`/`fb.go`/`shot.go`/`chargepage_linux.go` 带 `//go:build linux`，其余文件在 PC 上也能编译，所以 `go test ./...` 与 `p7assist render` 可以直接在 macOS / Windows 上跑。
 
 ---
 
@@ -154,7 +178,7 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
 ```
 README.md          本文
 AGENTS.md          协作规则（Issue / PR / README 同步 / 自查，改动前必读）
-build-all.sh       一键构建（仅 Windows，见第二节说明）：go test → 交叉编译 → 拷入 assets → 打 APK
+build-all.sh       一键构建（自动适配 macOS / Windows）：测试 → 交叉编译 → 拷入 assets → 打 APK
 carpad/            车机 Android App
 instrument/        仪表端 Go 守护进程
 tools/             addzip.py 与 testkey/（构建必需，共 3KB）
@@ -177,7 +201,7 @@ carpad/
     charge.pack            充电动画帧包（P7VP）
     chargeanm/*.jpg        逐帧投屏兜底帧
     Alibaba-PuHuiTi-Regular.ttf   中文字体
-  res/ AndroidManifest.xml build.sh
+  res/ AndroidManifest.xml build.sh build-mac.sh
 
 instrument/
   daemon.go        主循环（fb1 绘制、充电让出、视频模式切换）
@@ -185,6 +209,7 @@ instrument/
   chgoverlay.go    文字层生成（760×540 灰度 JPEG）
   chargeframe.go   逐帧投屏接收（回落通道）
   chargepage.go    充电页绘制/排版/状态判定
+  chargepage_linux.go  充电页运行时采集（依赖 box，仅 Linux）
   chargewarn.go    充电警示文案表
   canvas.go fb.go  framebuffer 与绘制
   ...

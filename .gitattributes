@@ -1,0 +1,10 @@
+# 换行符约定
+#
+# 设备端脚本（p7boot.sh / p7watch.sh / install-autostart.sh …）会被推到仪表，
+# 由 /bin/sh 执行。CRLF 会让 shebang 变成 `#!/bin/sh\r`，报 `\r: not found`
+# ——2026-11-18 就因此发现 install-autostart.sh 在仓库里是 CRLF。
+# 这里强制 shell / python 脚本以 LF 行尾检出与入库。
+*.sh   text eol=lf
+*.py   text eol=lf
+
+# Go 与 Java 源码不声明属性：沿用本机 autocrlf（当前未设 = 原样存取）

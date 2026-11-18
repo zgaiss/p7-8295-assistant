@@ -525,6 +525,9 @@ func canvasNonEmpty(cv *canvas) int {
 func TestLyricPausedHidden(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Features.Lyric = true
+	// 隐藏由 LyricHideOnPause 控制，默认关（暂停后停在最后一句），
+	// 见 config.go 中该字段的注释；本用例只验证开关打开后的行为。
+	cfg.Features.LyricHideOnPause = true
 	s := sampleSnapshot()
 	s.lyric = lyricSample()
 	s.lyricOK = true
@@ -551,6 +554,26 @@ func TestLyricPausedHidden(t *testing.T) {
 	paintLyric(cvBottom, cfg, s, true, nil)
 	if n := canvasNonEmpty(cvBottom); n != 0 {
 		t.Fatalf("暂停时底部歌词也应隐藏，实际非透明像素 %d", n)
+	}
+}
+
+// TestLyricPausedKeepsLastLine 覆盖默认行为：开关关时暂停仍停在最后一句。
+// 这是 config.go 中 LyricHideOnPause 注释声明的默认语义，必须与实现一致。
+func TestLyricPausedKeepsLastLine(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Features.Lyric = true
+	if cfg.Features.LyricHideOnPause {
+		t.Fatal("LyricHideOnPause 默认应为关")
+	}
+	s := sampleSnapshot()
+	s.lyric = lyricSample()
+	s.lyricOK = true
+	s.lyric.playing = false
+
+	cv := newCanvas()
+	paintLyric(cv, cfg, s, true, nil)
+	if canvasNonEmpty(cv) == 0 {
+		t.Fatal("开关关闭时，暂停后应保留最后一句歌词")
 	}
 }
 
