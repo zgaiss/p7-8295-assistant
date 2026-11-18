@@ -36,7 +36,7 @@ mkdir -p build/compiled build/gen build/classes build/dex build/apk
     -I "$AJAR" \
     --manifest AndroidManifest.xml \
     --min-sdk-version 28 --target-sdk-version 28 \
-    --version-code 100 --version-name 2.12.2 \
+    --version-code 101 --version-name 2.12.3 \
     --java build/gen \
     build/compiled/res.zip
 
