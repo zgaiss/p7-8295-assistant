@@ -1,6 +1,6 @@
-# P7 仪表助手 · 源码（v2.12.1 · 充电视频版）
+# P7 仪表助手 · 源码（v2.12.2 · 充电视频版）
 
-小鹏 P7 车机 App + 仪表端守护进程。本包是 v2.12.1 的完整源码，对应 APK：`P7仪表助手_v2.12.1_充电视频版.apk`。
+小鹏 P7 车机 App + 仪表端守护进程。本包是 v2.12.2 的完整源码，对应 APK：`P7仪表助手_v2.12.2_充电视频版.apk`。
 
 ---
 
@@ -169,6 +169,19 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
    `PushService.checkClusterVersion()` 比对 `status.version` 与 APK 的 `versionName`，不一致就推一次。
    所以两边版本号必须完全相同，否则会无限重推。
 
+7. **fb1 是 16bpp，颜色必须按 565 取码并抖动，不能直接用 8bit 值**。
+   fb0 是 32bpp（stride 7680），fb1 是 RGB565（stride 3840）——同一块区域跨两个精度不同的平面。
+   两个坑都在 `rgb565.go` 里解决：
+
+   - **取码用最近邻，不能截断**。显示端把码值展开回 8bit 是 MSB 复制（`code<<3|code>>2`，抓帧回读同规则）。
+     写 `v>>3` 等于一路向下取整，且 R/B 丢 3bit、G 只丢 2bit，误差单向偏负且三通道不等：
+     实机把歌词卡片铺成原厂底色时测到 **R−7 G0 B−3**，观感是夜间整块发暗、白天发绿。
+   - **平缓渐变要抖动**。夜间底图横向渐变只有 11 级振幅，而 5bit 的 R/B 步长就是 8 级，
+     整条渐变只落在两个码值上，交界处是 8 级台阶（屏幕上表现为"波纹"）。
+     用 8×8 Bayer 按残差比例把像素拆到相邻两码值，空间平均回到原色；残差为 0 的平坦区不抖，不出颗粒。
+
+   改完实测：卡片与原厂底图 8px 窗口平均偏差从 ±4 级降到 **≤0.8 级**。
+
 ---
 
 ## 五、目录
@@ -181,7 +194,7 @@ AGENTS.md          协作规则（Issue / PR / README 同步 / 自查，改动�
 build-all.sh       一键构建（自动适配 macOS / Windows）：测试 → 交叉编译 → 拷入 assets → 打 APK
 carpad/            车机 Android App
 instrument/        仪表端 Go 守护进程
-tools/             addzip.py 与 testkey/（构建必需，共 3KB）
+tools/             addzip.py、gen_bgmap.py 与 testkey/（构建与生成必需）
 .gitignore         忽略 dist/、carpad/build/、字体、工具链
 ```
 
@@ -212,6 +225,9 @@ instrument/
   chargepage_linux.go  充电页运行时采集（依赖 box，仅 Linux）
   chargewarn.go    充电警示文案表
   canvas.go fb.go  framebuffer 与绘制
+  rgb565.go        RGB565 最近邻取码与 8×8 Bayer 抖动（见第四节第 7 条）
+  bgmap.go         原厂底图色值表取样：歌词卡片底色按屏幕坐标从底图取色
+  bgmap_data.go    色值表数据，由 tools/gen_bgmap.py 生成，勿手改
   ...
 ```
 

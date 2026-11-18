@@ -44,6 +44,9 @@ type canvas struct {
 	// ox/oy 是临时绘制偏移，只给 paintLyric 左上角歌词块用（拖动位置）。
 	// 默认 0，其它组件无感知；paintLyric 进入时设置、defer 清零。
 	ox, oy float64
+	// bg 是原厂层（fb0）只读采样源，只用于辨认现场用的是哪一套底图
+	// （见 bgmap.go 的 bgVariantPick）。为 nil 时按默认套系取色。
+	bg bgPix
 }
 
 type rect struct{ x0, y0, x1, y1 float64 }

@@ -324,10 +324,7 @@ func (d *fbDev) blitOpaqueFull(cv *canvas) {
 	src := cv.img.Pix
 	si, di := 0, 0
 	for di < need {
-		r := src[si]
-		gg := src[si+1]
-		b := src[si+2]
-		v := uint16(r>>3)<<11 | uint16(gg>>2)<<5 | uint16(b>>3)
+		v := pack565(src[si], src[si+1], src[si+2])
 		buf[di] = byte(v)
 		buf[di+1] = byte(v >> 8)
 		si += 4
@@ -370,7 +367,7 @@ func (d *fbDev) blit(cv *canvas, b rect) {
 						bl = mix8(bb, bl, a)
 					}
 				}
-				v = uint16(r>>3)<<11 | uint16(g>>2)<<5 | uint16(bl>>3)
+				v = pack565(r, g, bl)
 			}
 			p := x * 2
 			if p+1 >= len(row) {
