@@ -587,6 +587,7 @@ func daemonMain() {
 	lastForce := -1 // charge.force 上一次的值（-1=文件不存在），只在变化时打日志
 	// 待升级文件的 (size/mtime) 指纹：只有连续 upgradeHoldS 秒不变才采纳
 	var upSig string
+	var updateFence legacyUpdateFence
 	var upSince time.Time
 	frames := int64(0)
 
@@ -718,7 +719,7 @@ func daemonMain() {
 		// 新二进制（车机经 FTP 推上来）-> 等写入稳定 + 校验 ELF 后热替换并 exec。
 		// 不能一看到就换：传输中途的文件是个缺尾巴的半截 ELF，换上就等于把
 		// 进程换成起不来的文件（2026-11-15 实车踩过，见 upgrade.go 注释）。
-		if st, err := os.Stat(upgradePath); err == nil && st.Size() > 64*1024 {
+		if st, err := os.Stat(upgradePath); updateFence.allowed(dir) && err == nil && st.Size() > 64*1024 {
 			sig := fmt.Sprintf("%d/%d", st.Size(), st.ModTime().UnixNano())
 			if sig != upSig {
 				upSig, upSince = sig, now
@@ -728,14 +729,16 @@ func daemonMain() {
 					lg.Printf("%s 不是 ELF（%d 字节），已忽略", upgradePath, st.Size())
 					_ = os.Remove(upgradePath)
 					upSig = ""
-				} else {
+				} else if updateFence.allowed(dir) {
 					lg.Printf("发现新版本 %d 字节（已稳定 %ds），热替换并重启", st.Size(), upgradeHoldS)
 					_ = os.Chmod(upgradePath, 0755)
 					restore(fb)
 					if exe, err := os.Executable(); err == nil {
-						if err := os.Rename(upgradePath, exe); err == nil {
-							syscall.Exec(exe, os.Args, os.Environ())
-							return
+						if updateFence.allowed(dir) {
+							if err := os.Rename(upgradePath, exe); err == nil {
+								syscall.Exec(exe, os.Args, os.Environ())
+								return
+							}
 						}
 					}
 					lg.Printf("热替换失败，保留旧版本运行")
