@@ -946,6 +946,8 @@ func daemonMain() {
 		// 清上一帧区域
 		cv.clearRect(prev)
 		cv.dirty = rect{}
+		// 歌词卡片要按原厂底图取色，这里把 fb0 句柄挂上（fb 可能被重开过，每帧赋值）
+		cv.bg = fb.bg
 
 		drawn := false
 		chargeFull := false

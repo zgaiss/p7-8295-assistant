@@ -28,8 +28,13 @@ var (
 	nightNaN    = color.RGBA{0xA9, 0xB6, 0xBF, 0xFF}
 	nightLine   = color.RGBA{0x8A, 0x94, 0x9C, 0xFF}
 
-	// 歌词背景卡片：取自车机中控屏「正在播放条」下方那层底色
-	// （夜间实测 #191A1F、白天 #DFE3EB），跟仪表昼夜自动切换。
+	// 歌词背景卡片：色值取自车机中控屏「正在播放条」下方那层底色
+	// （夜间 #191A1F、白天 #DFE3EB），跟仪表昼夜自动切换。
+	//
+	// 这两个常量只作**兜底**：正常路径是 bgmap.go 里的原厂底图色值表——
+	// 原厂那一层不是纯色而是横向渐变（夜间 #15171A→#090B0F、白天 #E7EDF8→#DFE8F5），
+	// 平涂只能对上渐变上的某一个 x，两端必然一侧亮一侧暗，卡片就成一块贴上去的矩形
+	// （实机取证：夜间右边缘台阶 +13.1、白天左边缘 −9.7）。
 	lyricBgNight = color.RGBA{0x19, 0x1A, 0x1F, 0xFF}
 	lyricBgDay   = color.RGBA{0xDF, 0xE3, 0xEB, 0xFF}
 
@@ -831,12 +836,19 @@ func paintLyric(cv *canvas, cfg Config, s snapshot, night bool, applyT func(x, y
 		if next != "" && h+nextLH <= maxH {
 			h += nextLH
 		}
-		col := lyricBgDay
-		if night {
-			col = lyricBgNight
+		// 底色取自原厂底图色值表（bgmap.go）：卡片占据哪块区域，就从底图上
+		// 取哪块的色值，拖动时自动跟着变。拿不到色值表才退回固定色。
+		bx0 := left - 30*k + cv.ox
+		by0 := top - 14*k + cv.oy
+		bx1 := left + maxW + 18*k + cv.ox
+		by1 := top - 14*k + h + 20*k + cv.oy
+		if !cv.fillLyricBg(bx0, by0, bx1, by1, 14*k, night) {
+			col := lyricBgDay
+			if night {
+				col = lyricBgNight
+			}
+			cv.fillRoundRectAA(bx0, by0, bx1, by1, 14*k, col)
 		}
-		cv.fillRoundRectAA(left-30*k+cv.ox, top-14*k+cv.oy,
-			left+maxW+18*k+cv.ox, top-14*k+h+20*k+cv.oy, 14*k, col)
 	}
 
 	// 对齐方式：「居中排布」开关决定块内文字是居中还是左对齐。
