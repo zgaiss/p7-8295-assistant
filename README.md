@@ -34,7 +34,19 @@ tools/plat/<platform>/android.jar
 tools/testkey/{testkey.pk8,testkey.x509.pem}   # AOSP testkey，车机信任
 ```
 
-版本号写在 `build.sh` 的 `--version-code/--version-name`，**必须与 `instrument/config.go` 的 `appVersion` 完全一致**（原因见第五节）。
+版本号写在 `build.sh` 的 `--version-code/--version-name`，**必须与 `instrument/config.go` 的 `appVersion`、`build-mac.sh` 的同名字段完全一致**（原因见第四节第 6 条）。
+
+`build.sh` 是 Windows 版（调用 `aapt2.exe`/`d8.bat` 等）。**macOS 用 `build-mac.sh`**，流程相同，差别只有工具路径无 `.exe` 后缀、JDK 走 `Contents/Home`，以及**签名统一用 `tools/testkey`（AOSP testkey）而不是 `carpad/p7.keystore`**：
+
+```bash
+cd carpad
+sh build-mac.sh
+# 产物：../dist/P7仪表助手-原生版.apk
+```
+
+两条脚本产出的文件名都是 `P7仪表助手-原生版.apk`；对外发布时重命名为 `P7仪表助手_v<版本>_充电视频版.apk`（与本文标题、首段一致）。`dist/` 目录由脚本自动创建。
+
+> ⚠️ `build-all.sh`（一键构建）目前末尾固定调用 `build.sh`，即 **Windows 版**。在 macOS 上执行会在打包这一步失败（此时 `carpad/assets/p7assist` 已被覆盖），请直接分两步跑：先编仪表端，再 `sh build-mac.sh`。修复计划见 Issue #4。
 
 ### 2. 仪表端二进制
 
@@ -137,6 +149,20 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
 
 ## 五、目录
 
+仓库顶层：
+
+```
+README.md          本文
+AGENTS.md          协作规则（Issue / PR / README 同步 / 自查，改动前必读）
+build-all.sh       一键构建（仅 Windows，见第二节说明）：go test → 交叉编译 → 拷入 assets → 打 APK
+carpad/            车机 Android App
+instrument/        仪表端 Go 守护进程
+tools/             addzip.py 与 testkey/（构建必需，共 3KB）
+.gitignore         忽略 dist/、carpad/build/、字体、工具链
+```
+
+主要源码：
+
 ```
 carpad/
   src/com/xiaopeng/clusterassist/
@@ -181,4 +207,28 @@ instrument/
 - `assets/p7videoplay` 是**第三方交付的静态 ARM 播放器**（P7 充电动画投屏方案 v1.0.35 配套），本仓库不包含其源码；
   对应源码在对方交付包的 `source/players/p7videoplay.c`（依赖 zig + libjpeg-turbo 构建）。
 - `carpad/p7.keystore` 是**签名私钥**（口令 `p7p7p7`）。外传后别人可以签出同名包覆盖安装，自行决定是否保留。
+
+  > ⚠️ 该私钥目前仍随仓库分发，与 `AGENTS.md` 第 10 节「签名材料不入库」冲突，清理计划见 Issue #3。在清理完成前：**不要用这把私钥签任何要对外分发的包**。注意两个构建脚本签名来源不同——`build.sh`（Windows）复用同目录的 `p7.keystore`，`build-mac.sh` 用的是 `tools/testkey`（AOSP testkey）。
+
 - 充电界面是**非官方功能**，会整屏接管仪表。App 内首次开启有免责声明，请勿用该界面判断能否拔枪/离车，以车机和充电桩为准。
+
+---
+
+## 八、参与开发
+
+动手之前请先读 **[`AGENTS.md`](AGENTS.md)**，那是本仓库的强制协作规则。要点：
+
+1. **先建 Issue**，说清背景、目标、方案要点、影响面、验收标准
+2. 从最新 `main` 拉分支（`feat/` `fix/` `chore/` `docs/` `refactor/`）
+3. 提 PR，正文写 `Closes #N`
+4. 自查自己的 diff，不合理的地方就地修正
+5. **同一个 PR 内更新本文档**（构建方式、目录、版本号、行为变化都要同步）
+
+`main` 已开启强制 PR 规则，直接推送会被拒绝：
+
+```
+remote: error: GH013: Repository rule violations found for refs/heads/main.
+remote: - Changes must be made through a pull request.
+```
+
+提交身份必须是 `zgaiss <187540906+zgaiss@users.noreply.github.com>`，不要带入个人或公司邮箱。
