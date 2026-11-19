@@ -567,6 +567,19 @@ public class MainActivity extends Activity {
         swLyric = (PillSwitch) n2.getTag();
         p.addView(ui.pair(n1, n2));
 
+        // 弹窗避让：仪表上的原厂浮层会压在我们的卡上，检测到就按侧收起自己的卡。
+        // 只改仪表叠加层，车机屏与系统状态一概不动。
+        p.addView(ui.group("原厂弹窗避让"));
+        p.addView(toggle("弹窗避让", "实测中",
+                "仪表弹出原厂浮层（ACC 车速/车距、空调温度/风量、音量 OSD、N 档确认、车门未关、车头雷达）时，"
+                        + "自动隐藏同一侧的卡片：左侧弹窗收起歌词卡，右侧弹窗收起导航卡；弹窗消失约 1 秒后自动恢复。\n"
+                        + "检测在车机侧读 HAL 日志完成（与盲区探针同一条本地 adb 通道），车机屏不受影响。"
+                        + "日志读不到、adb 未授权或本开关关闭时一律不隐藏——宁可弹窗期露一下卡，也不会让卡永久消失。",
+                prefs.popupHide,
+                new Setter() { @Override public void set(boolean v) { prefs.popupHide = v; } }));
+        p.addView(ui.hint("只有在方向盘上操作、或车门/档位/雷达触发时仪表才会弹窗；"
+                + "在车机屏上直接调空调、音量不会让仪表弹窗，也就不会触发隐藏。"));
+
         // 红绿灯读秒：数据来自「红绿灯领航」自带 SDK 的日志，与它的界面无关
         p.addView(ui.group("红绿灯（路口读秒）"));
         LinearLayout t1 = toggle("红绿灯读秒", "内测",

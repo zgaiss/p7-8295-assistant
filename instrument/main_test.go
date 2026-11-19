@@ -38,8 +38,9 @@ func TestStepT(t *testing.T) {
 
 func TestConfigMask(t *testing.T) {
 	c := defaultConfig()
-	// 默认开启：胎压显示/精度、盲区、导航、歌词（不含底部歌词）、转向灯、行程四项、红绿灯
-	want := 2 + 4 + 32 + 64 + 128 + 256 + 512 + 1024 + 2048 + 8192
+	// 默认开启：胎压显示/精度、盲区、导航、歌词（不含底部歌词）、转向灯、行程四项、红绿灯、
+	// 弹窗避让（2097152）
+	want := 2 + 4 + 32 + 64 + 128 + 256 + 512 + 1024 + 2048 + 8192 + 2097152
 	if c.mask() != want {
 		t.Fatalf("mask=%d want %d", c.mask(), want)
 	}

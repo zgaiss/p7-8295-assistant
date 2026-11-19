@@ -274,6 +274,47 @@ public final class LocalAdb {
         return null;
     }
 
+    /** 专用 adb 连接 + 长驻命令流；两样都要关（先关流再关连接）。 */
+    public static final class ShellLink {
+        public final AdbClient client;
+        public final AdbClient.ShellStream stream;
+
+        ShellLink(AdbClient c, AdbClient.ShellStream s) {
+            client = c;
+            stream = s;
+        }
+
+        public void close() {
+            try { stream.close(); } catch (Throwable ignored) { }
+            try { client.close(); } catch (Throwable ignored) { }
+        }
+    }
+
+    /**
+     * 新开一条**独立**连接跑长驻命令，返回可逐行读的流（例如 logcat）。
+     *
+     * <p>为什么不复用共享连接：持有流期间同一个 AdbClient 不能再跑 shell()（adbd 会把
+     * 两路数据串在一起），电压/胎压轮询会跟着坏掉。盲区常驻探针也是单独开一条的，
+     * 这里沿用同一套做法。连接沿用已授权的同一把钥匙，不会再弹「允许 USB 调试」。
+     *
+     * <p>必须在后台线程调用（内部可能阻塞到用户点授权）。
+     */
+    public static ShellLink openDedicatedShell(Context ctx, String cmd) throws Exception {
+        if (ensure(ctx) == null) throw new java.io.IOException("本地 adb 未就绪：" + lastState);
+        KeyPair kp = keyPair(ctx);
+        if (kp == null || !(kp.getPublic() instanceof RSAPublicKey)) {
+            throw new java.io.IOException("adb 密钥不可用");
+        }
+        AdbClient adb = new AdbClient(kp.getPrivate(), (RSAPublicKey) kp.getPublic(), "p7assist@xpeng");
+        try {
+            adb.connect(HOST, port(), 30000);
+            return new ShellLink(adb, adb.openShell(cmd));
+        } catch (Exception e) {
+            try { adb.close(); } catch (Throwable ignored) { }
+            throw e;
+        }
+    }
+
     /**
      * 通知监听组件。歌词和导航都靠它读 MediaSession。
      */

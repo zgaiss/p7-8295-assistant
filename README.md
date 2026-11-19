@@ -1,6 +1,6 @@
-# P7 仪表助手 · 源码（v2.12.4 · 充电视频版）
+# P7 仪表助手 · 源码（v2.12.5 · 弹窗避让版）
 
-小鹏 P7 车机 App + 仪表端守护进程。本包是 v2.12.4 的完整源码，对应 APK：`P7仪表助手_v2.12.4_充电视频版.apk`。
+小鹏 P7 车机 App + 仪表端守护进程。本包是 v2.12.5 的完整源码，对应 APK：`P7仪表助手_v2.12.5_弹窗避让版.apk`。
 
 ---
 
@@ -8,7 +8,7 @@
 
 | 目录 | 语言 | 跑在哪 | 作用 |
 |---|---|---|---|
-| `carpad/` | Java（无 Gradle，aapt2 + javac + d8 直接打） | 车机 Android | 读车况/媒体信息，通过 FTP 把配置和歌词推给仪表；充电动画资源的部署与调试入口 |
+| `carpad/` | Java（无 Gradle，aapt2 + javac + d8 直接打） | 车机 Android | 读车况/媒体信息，通过 FTP 把配置和歌词推给仪表；读 HAL 日志推断仪表弹窗；充电动画资源的部署与调试入口 |
 | `instrument/` | Go（交叉编译到 linux/arm） | 仪表 i.MX6（Linux 3.0.35） | 直接写 fb1 前景层，画胎压/歌词/盲区/导航/红绿灯/充电页文字 |
 
 两边通过 **仪表侧 FTP（172.20.1.40:2221，root/空密码，chroot 在 /data）** 和 **30510 管理通道**交换数据。
@@ -169,7 +169,18 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
    `PushService.checkClusterVersion()` 比对 `status.version` 与 APK 的 `versionName`，不一致就推一次。
    所以两边版本号必须完全相同，否则会无限重推。
 
-7. **fb1 是 16bpp，颜色必须按 565 取码并抖动，不能直接用 8bit 值**。
+7. **弹窗避让靠「按键/状态」代理，不追「弹窗信号」**。
+   仪表上没有「弹窗可见」这个统一状态量：349 个 DBus 属性里无聚合量（`host-icm-left/right-menu-control` 恒 `-1,0,0`），
+   OEM 内部的 `CardManager::showOverlay()` 只在 Kanzi 进程里。所以车机侧从 HAL 日志推：方向盘左 4 键（ACC 开 3.2s / 关 2.2s）、
+   右音量键与 `ICM_OSDSHOW`（2.2s）、车门/雷达/N 档确认（锁存 + 撤销后 2s）。同集 0.9s 内合并，只延长不缩短。
+   **实测结论：在车机屏上直接调空调/音量，仪表不会弹窗——只有方向盘按键才弹**，所以按键代理比追信号稳，时序也早于弹窗。
+
+   `popup` 字段只推「剩余毫秒」不推绝对时刻（仪表 RTC 停在 2019，两边差 8 小时，红绿灯同款坑）；
+   仪表用 ext.json 的 mtime 当观测时刻本地倒计时，车机停推即自然到期——**fail-open，宁可弹窗期露一下卡，不会让卡永久消失**。
+   门控只作用于歌词卡（按实际拖动位置判侧）与右侧两张导航卡；胎压四轮、底部分数据行、红绿灯卡是原厂底盘布局，不参与。
+   实车核对看 `status.json` 的 `popupL/popupR/popupMsL/popupMsR/popupWhy`，车机侧看 `logcat -s P7Popup`。
+
+8. **fb1 是 16bpp，颜色必须按 565 取码并抖动，不能直接用 8bit 值**。
    fb0 是 32bpp（stride 7680），fb1 是 RGB565（stride 3840）——同一块区域跨两个精度不同的平面。
    两个坑都在 `rgb565.go` 里解决：
 
@@ -208,6 +219,8 @@ carpad/
     Deploy.java            FTP 部署与状态读取
     ChargeAnim.java        逐帧投屏（仪表缺播放器时的回落通道）
     Ftp.java IcRpc.java IcRelay.java    传输层
+    PopupLogic.java        弹窗检测状态机（纯 Java、无 Android 依赖，可在 PC 上回放验证）
+    PopupSource.java       弹窗检测胶水层：独立 adb 连接跑 logcat 流，200ms 重算
   assets/
     p7assist               仪表端二进制（构建后替换）
     p7videoplay            视频播放器（第三方，见第七节）
@@ -225,7 +238,8 @@ instrument/
   chargepage_linux.go  充电页运行时采集（依赖 box，仅 Linux）
   chargewarn.go    充电警示文案表
   canvas.go fb.go  framebuffer 与绘制
-  rgb565.go        RGB565 最近邻取码与 8×8 Bayer 抖动（见第四节第 7 条）
+  popup.go         弹窗避让：ext.popup 的剩余毫秒折成本地截止时刻（fail-open）
+  rgb565.go        RGB565 最近邻取码与 8×8 Bayer 抖动（见第四节第 8 条）
   bgmap.go         原厂底图色值表取样：歌词卡片底色按屏幕坐标从底图取色
   bgmap_data.go    色值表数据，由 tools/gen_bgmap.py 生成，勿手改
   ...
@@ -240,6 +254,11 @@ instrument/
 - `get_host_icm_charging_duration` 返回 `[-1,0,0]`，充电时长不可用。
 - 电池温度/充电口温度在部分桩上返回 0 且 `cellOK/portOK=false`。
 - 仪表固件升级后属性名/枚举可能变化，需重新标定（App 内「充电数据自检 → 查看充电原始数据」可以导出原始值）。
+- 弹窗检测的日志 tag / 档位枚举来自 **820A** 实车标定，本车是 **8295** 固件，尚未逐条核对：
+  实车用 `logcat -v epoch -T 1 XpengVehicleHal:I CarDrivingScene:I '*:S'` 抓一段，按方向盘左 4 键 / 右音量键 / 开门，
+  对照 `logcat -s P7Popup` 与 `status.json` 的 `popup*` 字段确认。读不到行时不会误隐藏（fail-open），
+  但「该隐藏没隐藏」需要按实车 tag 名改 `PopupLogic` 的匹配串与 `PARK_GEAR`。
+- 雷达视图间歇失效（参考实现在 820A 上也未定案）：`CarDrivingScene` 的 ENTER/EXIT 只偶尔伴随，兜底是 60s 静默失效。
 
 ---
 

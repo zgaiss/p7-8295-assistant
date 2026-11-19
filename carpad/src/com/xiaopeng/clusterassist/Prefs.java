@@ -43,6 +43,11 @@ public class Prefs {
     public boolean chargeWarnPreview = false;
     /** 8 态轮播：每 6 秒换一个充电界面态，仅调试用 */
     public boolean chargeStatePreview = false;
+    /**
+     * 弹窗避让：仪表出现原厂弹窗（ACC/空调/音量/N 档/车门/雷达）时，按侧隐藏自绘卡片。
+     * 检测器在车机侧读 HAL 日志，车机屏本身什么都不改；关掉后仪表不再隐藏任何卡片。
+     */
+    public boolean popupHide = true;
     public boolean tripDist = true;
     public boolean tripTime = true;
     public boolean tripSpeed = true;
@@ -100,6 +105,7 @@ public class Prefs {
         p.chargeDebug = sp.getBoolean("chargeDebug", false);
         p.chargeWarnPreview = sp.getBoolean("chargeWarnPreview", false);
         p.chargeStatePreview = sp.getBoolean("chargeStatePreview", false);
+        p.popupHide = sp.getBoolean("popupHide", true);
         p.tripDist = sp.getBoolean("tripDist", true);
         p.tripTime = sp.getBoolean("tripTime", true);
         p.tripSpeed = sp.getBoolean("tripSpeed", true);
@@ -147,6 +153,7 @@ public class Prefs {
         e.putBoolean("chargeDebug", chargeDebug);
         e.putBoolean("chargeWarnPreview", chargeWarnPreview);
         e.putBoolean("chargeStatePreview", chargeStatePreview);
+        e.putBoolean("popupHide", popupHide);
         e.putBoolean("tripDist", tripDist);
         e.putBoolean("tripTime", tripTime);
         e.putBoolean("tripSpeed", tripSpeed);
@@ -176,6 +183,7 @@ public class Prefs {
         p.bsd = bsd; p.nav = nav; p.lyric = lyric; p.lyricBottom = lyricBottom; p.lyricBg = lyricBg; p.lyricHideOnPause = lyricHideOnPause; p.lyricCenter = lyricCenter; p.lyricLock = lyricLock; p.chargePage = chargePage; p.chargeDebug = chargeDebug; p.chargeWarnPreview = chargeWarnPreview; p.chargeStatePreview = chargeStatePreview; p.tl = tl;
         p.tlDemo = tlDemo;
         p.tpmsHi = tpmsHi; p.tripDist = tripDist; p.tripTime = tripTime;
+        p.popupHide = popupHide;
         p.tripSpeed = tripSpeed; p.tripKwh = tripKwh; p.debug = debug;
         p.zoomSpeed = zoomSpeed; p.zoomMs = zoomMs; p.dayNight = dayNight;
         p.scale = scale; p.dx = dx; p.dy = dy;
@@ -206,6 +214,7 @@ public class Prefs {
         if (chargeDebug) m |= 262144;
         if (chargeWarnPreview) m |= 524288;
         if (chargeStatePreview) m |= 1048576;
+        if (popupHide) m |= 2097152;
         return m;
     }
 
@@ -232,6 +241,7 @@ public class Prefs {
                 + "\"chargeDebug\":" + chargeDebug + ","
                 + "\"chargeWarnPreview\":" + chargeWarnPreview + ","
                 + "\"chargeStatePreview\":" + chargeStatePreview + ","
+                + "\"popupHide\":" + popupHide + ","
                 + "\"trip\":{\"dist\":" + tripDist + ",\"time\":" + tripTime
                 + ",\"speed\":" + tripSpeed + ",\"kwh\":" + tripKwh + "},"
                 + "\"debug\":" + debug + "},"
