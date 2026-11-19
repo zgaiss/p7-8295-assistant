@@ -378,34 +378,46 @@ type statusDoc struct {
 	// ChargeAnim 充电动画已载入帧数，0 = 未载入（车机端据此判断要不要上传帧包）
 	ChargeAnim int `json:"chargeAnim"`
 	// 投屏状态（screen=车机投帧 / selfplay=仪表自播 / none=无画面）
-	ChgMode   string    `json:"chgMode"`
-	ChgFrmAge int       `json:"chgFrmAgeMs"`
-	ChgFrmKB  int       `json:"chgFrmKB"`
+	ChgMode   string `json:"chgMode"`
+	ChgFrmAge int    `json:"chgFrmAgeMs"`
+	ChgFrmKB  int    `json:"chgFrmKB"`
 	// ChgVideo 本地播放器是否在跑（vplay=播放器接管整屏 / ""=没跑）
 	ChgVideo string `json:"chgVideo"`
-	Enabled   bool      `json:"enabled"`
-	Screen    string    `json:"screen"` // on / off
-	Bus       bool      `json:"bus"`
-	Mode      string    `json:"mode"` // park / drive
-	Night     int       `json:"night"`
-	Gear      int32     `json:"gear"`
-	Speed     float64   `json:"speed"`
-	Mask      int       `json:"mask"`
-	TPMS      []float64 `json:"tpms"`    // bar，无效为 -1
-	TpmsSrc   string    `json:"tpmsSrc"` // bus=仪表总线(0.1bar) / car=车机CarProperty(0.01bar)
-	Temp      []float64 `json:"temp"`    // ℃，无效为 -999
-	Volt      float64   `json:"volt"`
-	Cabin     float64   `json:"cabin"`
-	TripKm    float64   `json:"tripKm"`
-	TripMin   float64   `json:"tripMin"`
-	TripAvg   float64   `json:"tripAvg"`
-	TripKwh   float64   `json:"tripKwh"`
-	NavAgeMs  int64     `json:"navAgeMs"`
-	Lyric     string    `json:"lyric"`     // 当前歌词行（车机 ext 推来，空=无）
-	LyricNxt  string    `json:"lyricNxt"`  // 下一行预览
-	LyricPlay bool      `json:"lyricPlay"` // 车机上报的播放态；false=暂停，歌词隐藏
-	Frames    int64     `json:"frames"`
-	ExtAgeMs  int64     `json:"extAgeMs"`
+	// 本地播放器实测指标（车机「刷新播放器状态」直接用这些，别再猜 24fps）
+	ChgWantFps    string    `json:"chgWantFps"`    // 配置的目标帧率（videofps）
+	ChgWrite      string    `json:"chgWrite"`      // 写屏方式 pwrite / mmap
+	ChgPackFrames int       `json:"chgPackFrames"` // 帧包包头帧数
+	ChgPackKB     int       `json:"chgPackKB"`     // 帧包大小
+	ChgRealFps    float64   `json:"chgRealFps"`    // 播放器实测帧率
+	ChgDecMs      float64   `json:"chgDecMs"`      // 解码耗时
+	ChgRenMs      float64   `json:"chgRenMs"`      // 缩放/转 565 耗时
+	ChgWriMs      float64   `json:"chgWriMs"`      // 写屏耗时
+	ChgVsync      string    `json:"chgVsync"`      // vsync ioctl 探测结果
+	ChgVsyncMode  string    `json:"chgVsyncMode"`  // 是否启用 vsync（on/off）
+	ChgStatsOK    bool      `json:"chgStatsOk"`    // 是否已解析到统计行
+	Enabled       bool      `json:"enabled"`
+	Screen        string    `json:"screen"` // on / off
+	Bus           bool      `json:"bus"`
+	Mode          string    `json:"mode"` // park / drive
+	Night         int       `json:"night"`
+	Gear          int32     `json:"gear"`
+	Speed         float64   `json:"speed"`
+	Mask          int       `json:"mask"`
+	TPMS          []float64 `json:"tpms"`    // bar，无效为 -1
+	TpmsSrc       string    `json:"tpmsSrc"` // bus=仪表总线(0.1bar) / car=车机CarProperty(0.01bar)
+	Temp          []float64 `json:"temp"`    // ℃，无效为 -999
+	Volt          float64   `json:"volt"`
+	Cabin         float64   `json:"cabin"`
+	TripKm        float64   `json:"tripKm"`
+	TripMin       float64   `json:"tripMin"`
+	TripAvg       float64   `json:"tripAvg"`
+	TripKwh       float64   `json:"tripKwh"`
+	NavAgeMs      int64     `json:"navAgeMs"`
+	Lyric         string    `json:"lyric"`     // 当前歌词行（车机 ext 推来，空=无）
+	LyricNxt      string    `json:"lyricNxt"`  // 下一行预览
+	LyricPlay     bool      `json:"lyricPlay"` // 车机上报的播放态；false=暂停，歌词隐藏
+	Frames        int64     `json:"frames"`
+	ExtAgeMs      int64     `json:"extAgeMs"`
 	// 充电让出：charging=true 表示当前判为充电中（前景层已关，原厂充电页可见），
 	// chg 是判定用的原始读数，实车标定枚举时看它
 	Charging bool   `json:"charging"`
@@ -417,6 +429,7 @@ type statusDoc struct {
 // 放在无平台约束的文件里，PC 上就能用假 snapshot 直接断言字段（见 charge_mock_test.go）。
 func buildStatus(s snapshot, cfg Config, screenOn bool, charging bool, chgRaw string) statusDoc {
 	chgMode, chgAgeMs, chgKB := chgFrameStatus()
+	vs := readVideoStats(appDir())
 	mode := "park"
 	if s.gearOK && s.gear != 4 {
 		mode = "drive"
@@ -430,27 +443,39 @@ func buildStatus(s snapshot, cfg Config, screenOn bool, charging bool, chgRaw st
 		ChgFrmAge:  chgAgeMs,
 		ChgFrmKB:   chgKB,
 		ChgVideo:   chgVideoTag(),
-		Enabled:    cfg.Enabled,
-		Screen:     "off",
-		Bus:        s.busOK,
-		Mode:       mode,
-		Gear:       s.gear,
-		Speed:      s.speed,
-		Mask:       cfg.mask(),
-		TPMS:       []float64{-1, -1, -1, -1},
-		Temp:       []float64{-999, -999, -999, -999},
-		Volt:       -1,
-		Cabin:      -999,
-		TripKm:     s.tripKm,
-		TripMin:    s.tripMin,
-		TripAvg:    s.tripAvg,
-		TripKwh:    s.tripKwh,
-		NavAgeMs:   s.navAgeMs,
-		TpmsSrc:    "bus",
-		Frames:     s.frames,
-		ExtAgeMs:   s.extAgeMs,
-		Charging:   charging,
-		Chg:        chgRaw,
+
+		ChgWantFps:    vs.WantFps,
+		ChgWrite:      vs.WriteMode,
+		ChgPackFrames: vs.PackFrames,
+		ChgPackKB:     vs.PackKB,
+		ChgRealFps:    vs.RealFps,
+		ChgDecMs:      vs.DecMs,
+		ChgRenMs:      vs.RenMs,
+		ChgWriMs:      vs.WriMs,
+		ChgVsync:      vs.Vsync,
+		ChgVsyncMode:  vs.VsyncMode,
+		ChgStatsOK:    vs.OK,
+		Enabled:       cfg.Enabled,
+		Screen:        "off",
+		Bus:           s.busOK,
+		Mode:          mode,
+		Gear:          s.gear,
+		Speed:         s.speed,
+		Mask:          cfg.mask(),
+		TPMS:          []float64{-1, -1, -1, -1},
+		Temp:          []float64{-999, -999, -999, -999},
+		Volt:          -1,
+		Cabin:         -999,
+		TripKm:        s.tripKm,
+		TripMin:       s.tripMin,
+		TripAvg:       s.tripAvg,
+		TripKwh:       s.tripKwh,
+		NavAgeMs:      s.navAgeMs,
+		TpmsSrc:       "bus",
+		Frames:        s.frames,
+		ExtAgeMs:      s.extAgeMs,
+		Charging:      charging,
+		Chg:           chgRaw,
 	}
 	if s.tpHi {
 		doc.TpmsSrc = "car"

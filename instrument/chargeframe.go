@@ -77,40 +77,31 @@ func pollChgFrame(dir string) {
 
 // frameFor 取当前应该显示的帧：
 //
-//	车机在投 +  新鲜 → 车机的帧
-//	车机断开          → 内置静态图（charge.bin 第 0 帧）
-//	都没有            → nil（调用方不画充电页，还原原厂画面）
+//	车机在投 + 新鲜 → 车机的帧
+//	车机断开/没帧   → nil（不画充电页，还原原厂画面）
+//
+// 2026-11-19 按用户要求去掉"内置帧包自播"兜底：车机断了就老老实实回到原厂仪表，
+// 不再用 charge.bin 播一个卡顿的替代动画（那会让用户以为仪表还在工作）。
 func frameFor() (image.Image, bool) {
 	chgFrame.mu.Lock()
 	fresh := chgFrame.ok && chgFrame.img != nil && time.Since(chgFrame.readAt) < chgFrameStaleMS*time.Millisecond
 	img := chgFrame.img
 	chgFrame.mu.Unlock()
 	if fresh {
-		return img, false // false = 不是静态兜底
+		return img, false
 	}
-	// 车机断开：用内置帧包自己播动画（车主接受"卡一点"，但要动）。
-	// 帧率由 charge.bin 头的 fps 决定（现在是 3fps / 25 帧 / 8 秒一轮）。
-	if chgAnim.idxNow() >= 0 {
-		if st := chgAnim.current(); st != nil {
-			return st, true
-		}
-	}
-	if st := chgAnim.frame(0); st != nil {
-		return st, true
-	}
-	return nil, true
+	return nil, false
 }
 
 // frameSig 当前帧标识（用于"画面没变就不重绘"的判断）。
-// 车机投帧时用 mtime；静态兜底用固定值——这样静态图只画一次。
+// 车机投帧时用 mtime；没有新鲜帧时返回 0，调用方据此不接管屏幕。
 func frameSig() uint64 {
 	chgFrame.mu.Lock()
 	defer chgFrame.mu.Unlock()
 	if chgFrame.ok && chgFrame.img != nil && time.Since(chgFrame.readAt) < chgFrameStaleMS*time.Millisecond {
 		return chgFrame.sig
 	}
-	// 仪表自播兜底：用帧号做签名，换帧就触发重绘（不换帧就完全不动，省 CPU）
-	return 0x10000000 | uint64(chgAnim.idxNow())
+	return 0
 }
 
 // chargeBgReady 有没有背景资源可用（没有就整块不画，把屏幕让回原厂）
@@ -123,15 +114,13 @@ func chargeBgReady() bool {
 
 // chgFrameStatus 给 status.json 用的投屏状态：
 //
-//	screen   = 正在用"车机投过来的帧"（车机连接正常）
-//	selfplay = 车机断开，仪表自己在播内置帧包
-//	none     = 两样都没有，充电页不会接管（原厂画面）
+//	screen = 正在用"车机投过来的帧"（车机连接正常）
+//	vplay  = 本地播放器接管
+//	none   = 没有可用帧，充电页不接管（原厂画面）
 //
-// ageMs 是最近一次收到/解码帧距今的毫秒数（selfplay/none 时为 -1），
-// kb 是帧文件大小（自播时为 0）。
+// ageMs 是最近一次收到/解码帧距今的毫秒数（vplay/none 时为 -1），
+// kb 是帧文件大小（vplay/none 时为 0）。
 func chgFrameStatus() (string, int, int) {
-	// 本地播放器接管时明确报 vplay：之前这里继续报 selfplay（因为 charge.bin 还在），
-	// 从车机看就像"仪表在自己播兜底帧包"，容易误判成两套动画在抢屏。
 	if videoRunning() {
 		return "vplay", -1, 0
 	}
@@ -142,9 +131,6 @@ func chgFrameStatus() (string, int, int) {
 	chgFrame.mu.Unlock()
 	if ok && age < chgFrameStaleMS {
 		return "screen", age, size
-	}
-	if chgAnim.count() > 0 {
-		return "selfplay", -1, 0
 	}
 	return "none", -1, 0
 }

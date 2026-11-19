@@ -109,56 +109,13 @@ public class PushService extends Service {
         }
     };
 
-    /**
-     * 充电动画投屏：车机出帧、按节奏推给仪表。
-     * 3 秒检查一次"还要不要发"——关掉充电页/调试开关后发送线程自己退出，
-     * 仪表端 2.5 秒收不到新帧会自动回落到内置静态图。
-     */
-    private final Runnable chgAnimTick = new Runnable() {
-        @Override public void run() {
-            try {
-                // 只在真正需要时投帧：调试模式，或"充电页开启且仪表回报正在充电"。
-                // 否则行驶中会一直往仪表刷 20KB×4/s，既占带宽又白耗仪表 CPU。
-                boolean want = prefs != null && (prefs.chargeDebug
-                        || (prefs.chargePage && chargingForAnim()));
-                // 仪表端本地播放器接管整屏时不用再推帧：那边是 charge.pack 本地 24fps 播放，
-                // 再推只会白占 FTP 带宽、抢仪表 CPU（实测会让播放掉到 20fps）。
-                if (want && videoModeOn()) want = false;
-                ChargeAnim.setWanted(PushService.this, deploy, want);
-            } catch (Throwable ignored) { }
-            handler.postDelayed(this, 3000);
-        }
-    };
-
-    /** 仪表是否在充电（10 秒缓存；读不到就当作"是"，宁可多投也不要不投） */
-    private boolean chargingForAnim() {
-        refreshChgStat();
-        return chgStatCharging;
-    }
-
-    /** 仪表端本地播放器是否已接管充电页（status.json 的 chgVideo=vplay） */
-    private boolean videoModeOn() {
-        refreshChgStat();
-        return chgStatVideo;
-    }
-
-    private void refreshChgStat() {
-        long now = System.currentTimeMillis();
-        if (now - chgStatAt <= 10000) return;
-        chgStatAt = now;
-        try {
-            org.json.JSONObject st = deploy.status();
-            chgStatCharging = st.optBoolean("charging", true);
-            chgStatVideo = "vplay".equals(st.optString("chgVideo", ""));
-        } catch (Throwable t) {
-            chgStatCharging = true;
-            chgStatVideo = false;
-        }
-    }
-
-    private long chgStatAt = 0;
-    private boolean chgStatCharging = true;
-    private boolean chgStatVideo = false;
+    // 车机逐帧投帧通道（chgAnimTick / ChargeAnim）已于 2026-11-20 移除。
+    //
+    // 原因：充电动画现在只走仪表本地播放器（p7videoplay 读 charge.pack 本地播）。
+    // 保留这条降级通道的后果是——播放器坏了、资源没到位时，画面还在动，
+    // 只是慢到 11fps，人根本看不出"播放器已经失效"，只会觉得"有点卡"。
+    // 用户的明确要求是：失效就回原厂界面，让问题暴露出来。
+    // 所以这里不再有任何推帧逻辑，仪表没收到帧就不接管充电页。
 
     /** 盲区快速轮询：200ms 一次读常驻探针缓存（近零延迟），变化立即推送 */    private final Runnable bsdTick = new Runnable() {
         @Override public void run() {
@@ -205,7 +162,6 @@ public class PushService extends Service {
         handler.post(tick);
         handler.post(lyricTick);
         handler.post(bsdTick);
-        handler.post(chgAnimTick);
         handler.post(tlTick);
         maybeGrantNotif();
         // 启动 15 秒后做一次仪表端版本自检：APK 覆盖升级只会换车机端代码，

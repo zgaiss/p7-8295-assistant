@@ -270,14 +270,37 @@ func (d *fbDev) close() {
 	}
 	// 先清像素 + 关层，再释放资源：任何关闭路径（含 panic 展开）都保证原厂仪表透出
 	restore(d)
+	d.release()
+}
+
+// closeQuiet 只释放句柄，不做 restore。
+//
+// 专用于"旧句柄即将被新句柄替换"的场景（applyOn 开层、recoverFG、reinit、
+// 几何自愈四处）：那里 openFB 已经拿到同一块 fb1 的新映射，紧接着就
+// setFGAttrs + layerOn + clearAll 重新接管。若此时仍走 close() 里的 restore，
+// 会先把整块显存清 0 再 FBIOBLANK(4) 关屏——屏幕必然黑一下；视频模式退出或
+// 重启播放器时，这一步和随后的 clearAll 叠起来就是肉眼看到的"闪黑两下"
+// （2026-11-19 实车定位）。
+func (d *fbDev) closeQuiet() {
+	if d == nil {
+		return
+	}
+	d.release()
+}
+
+// release 释放映射与文件句柄（不动像素、不改图层状态）。
+func (d *fbDev) release() {
 	if d.mem != nil {
 		syscall.Munmap(d.mem)
 		d.mem = nil
 	}
 	if d.f != nil {
 		d.f.Close()
+		d.f = nil
 	}
-	d.bg.close()
+	if d.bg != nil {
+		d.bg.close()
+	}
 }
 
 func (d *fbDev) clearAll() {

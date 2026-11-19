@@ -156,8 +156,11 @@ func paintFrame(cv *canvas, cfg Config, s snapshot, park bool, tAnim float64, ni
 	// 充电页：只在"充电中"或"调试开关打开"时接管。
 	// 调试开关单独生效——之前要求同时打开「充电界面」，用户点了调试看不到效果。
 	if (cfg.Features.ChargePage && s.chg.on) || cfg.Features.ChargeDebug {
-		paintCharge(cv, cfg, s, tAnim)
-		return
+		if paintCharge(cv, cfg, s, tAnim) {
+			return
+		}
+		// 没有可用背景（车机断开 / 无帧）：不接管，继续画常规组件，
+		// 让原厂仪表画面露出来，而不是留一片空白。
 	}
 	P := pal(night)
 	car := carPark
