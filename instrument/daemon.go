@@ -338,6 +338,9 @@ func watchExt(b *box, stop <-chan struct{}) {
 			b.mu.Lock()
 			b.ext = ext
 			b.s.extAgeMs = age.Milliseconds()
+			// 弹窗避让：剩余毫秒 + mtime 折成本地截止时刻，之后纯本地倒计时。
+			// ext 被 TTL 判过期时 loadExt 只保留 Night，Popup 为 nil → 两侧自动清零。
+			b.s.pop = popupFromExt(ext.Popup, age, time.Now().UnixMilli())
 			// 盲区：默认只认车机 CarProperty 推来的 SCU_BSD_WARNING，
 			// ext.json 一变就立即更新，不必等 collectSlow 的 2 秒慢通道。
 			if cfg.BSDSrc == "bus" {
@@ -398,6 +401,7 @@ func watchExt(b *box, stop <-chan struct{}) {
 			b.s.extAgeMs = time.Since(st.ModTime()).Milliseconds()
 			if time.Duration(b.s.extAgeMs)*time.Millisecond > time.Duration(cfg.Ext.TTLMs)*time.Millisecond {
 				b.s.voltOK, b.s.navOK, b.s.lyricOK = false, false, false
+				b.s.pop = popupGate{}
 				if cfg.BSDSrc != "bus" { // 车机不再推 ext 时清掉盲区，避免圆弧一直亮着
 					b.s.bsdL, b.s.bsdR = false, false
 				}
@@ -406,6 +410,7 @@ func watchExt(b *box, stop <-chan struct{}) {
 		} else {
 			b.mu.Lock()
 			b.s.voltOK, b.s.navOK, b.s.lyricOK = false, false, false
+			b.s.pop = popupGate{}
 			b.s.extAgeMs = -1
 			if cfg.BSDSrc != "bus" {
 				b.s.bsdL, b.s.bsdR = false, false

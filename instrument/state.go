@@ -129,6 +129,9 @@ type snapshot struct {
 	lyric   lyricInfo
 	lyricOK bool
 
+	// 原厂弹窗避让：左右两侧的本地截止时刻（由 ext.json 的 popup 字段折算，见 popup.go）
+	pop popupGate
+
 	busOK    bool
 	extAgeMs int64
 	frames   int64

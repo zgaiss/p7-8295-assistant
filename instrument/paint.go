@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"math"
 	"strings"
+	"time"
 
 	"golang.org/x/image/font"
 )
@@ -180,9 +181,36 @@ func paintFrame(cv *canvas, cfg Config, s snapshot, park bool, tAnim float64, ni
 	paintTPMS(cv, cfg, s, car, park, P, night)
 	paintBottom(cv, cfg, s, P, night, applyT)
 	paintBSD(cv, cfg, s, car, park)
-	paintNav(cv, cfg, s, night, applyT)
+
+	// 原厂弹窗避让：原厂浮层压在 fb1 之上，叠着我们的卡只会互相糊，所以按侧收起。
+	//
+	// 判定在车机侧完成（含「同一集只延长不缩短」的 0.9s 合并），这里只按侧取用；
+	// 截止时刻过了就自动恢复，不需要任何额外的复位逻辑（fail-open，见 popup.go）。
+	//
+	// 只动两张「浮动卡」：歌词卡（按实际拖动位置判侧）和右侧两张导航卡。
+	// 胎压四轮、底部分数据行、红绿灯卡是原厂底盘布局的一部分，与弹窗区不重叠，不参与。
+	nowMs := time.Now().UnixMilli()
+	hideL, hideR := false, false
+	if cfg.Features.popupHide() {
+		hideL, hideR = s.pop.leftAt(nowMs), s.pop.rightAt(nowMs)
+	}
+	if !hideR {
+		paintNav(cv, cfg, s, night, applyT)
+	}
 	paintTrafficLight(cv, cfg, s, park, night, applyT)
-	paintLyric(cv, cfg, s, night, applyT)
+	// 歌词块在左半边就跟着左侧弹窗走；用户把它拖到右半边，就跟着右侧走。
+	// 底部居中模式（lyricBottom）在屏幕中下，不在任何一侧的弹窗区，不参与避让。
+	hideLyric := false
+	if !cfg.Features.LyricBottom {
+		if lyricOnLeft(cfg) {
+			hideLyric = hideL
+		} else {
+			hideLyric = hideR
+		}
+	}
+	if !hideLyric {
+		paintLyric(cv, cfg, s, night, applyT)
+	}
 	if cfg.Features.Debug {
 		paintDebug(cv, cfg, s, park, tAnim, night)
 	}

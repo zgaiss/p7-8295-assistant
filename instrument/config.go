@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const appVersion = "2.12.4"
+const appVersion = "2.12.5"
 
 // buildTag 显示在充电页右下角（仅调试模式），用来区分同版本号的不同构建
 const buildTag = "b2026-11-18q"
@@ -69,6 +69,11 @@ type FeatureCfg struct {
 	// ChargeYield 充电让出：检测到充电就停止绘制、关掉前景层，让原厂充电页露出来，
 	// 充电结束（或拔枪）后自动恢复。默认开；config.json 里写 false 可关掉。
 	ChargeYield bool `json:"chargeYield"`
+	// PopupHide 原厂弹窗避让：仪表弹出原厂浮层时按侧隐藏歌词卡/导航卡（见 popup.go）。
+	//
+	// 用指针是为了区分「字段缺失」和「明确关掉」：旧版车机 APK 写出的 config.json 里
+	// 没有这个字段，缺失必须按**开**处理（默认值 true），否则升级仪表端后功能会静默失效。
+	PopupHide *bool `json:"popupHide"`
 	Debug       bool `json:"debug"` // 调试信息
 }
 
@@ -127,6 +132,8 @@ func defaultConfig() Config {
 			TLStyle: "native",
 			// 充电中让出原厂充电页：默认开。多数人希望充电时看到原厂的充电界面。
 			ChargeYield: true,
+			// 原厂弹窗避让：默认开（车机推来 popup 字段才生效，读不到就不隐藏）
+			PopupHide:   boolPtr(true),
 			Trip:        TripCfg{Dist: true, Time: true, Speed: true, Kwh: true},
 			Debug:       false,
 		},
@@ -284,6 +291,9 @@ func (c Config) mask() int {
 	if c.Features.ChargeStatePreview {
 		m |= 1048576
 	}
+	if c.Features.popupHide() {
+		m |= 2097152
+	}
 	return m
 }
 
@@ -328,6 +338,23 @@ type ExtTL struct {
 	Phases []ExtTLPhase `json:"phases"` // 单个路口最多三组
 }
 
+// ExtPopup 仪表左右两侧是否有原厂弹窗（车机从 HAL 日志推断后推来）。
+//
+// msL/msR 是**推送时刻**该侧还剩多少毫秒，不是绝对时刻：仪表按 ext.json 的 mtime
+// 当观测时刻本地倒计时（见 popup.go），因此完全不依赖两边时钟对齐。
+type ExtPopup struct {
+	L   int    `json:"L"`   // 1=左侧有弹窗
+	R   int    `json:"R"`   // 1=右侧有弹窗
+	Why string `json:"why"` // key/door/gear/radar/hold/vol，仅诊断
+	MsL int64  `json:"msL"` // 左侧剩余毫秒
+	MsR int64  `json:"msR"` // 右侧剩余毫秒
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// popupHide 弹窗避让开关：字段缺失（旧版车机 APK 写的 config.json）按**开**处理。
+func (f FeatureCfg) popupHide() bool { return f.PopupHide == nil || *f.PopupHide }
+
 type ExtData struct {
 	TS    int64     `json:"ts"`    // 写入时间（毫秒）
 	Volt  *float64  `json:"volt"`  // 12V 电压
@@ -337,6 +364,8 @@ type ExtData struct {
 	Nav   *ExtNav   `json:"nav"`
 	Lyric *ExtLyric `json:"lyric"`
 	TL    *ExtTL    `json:"tl"`
+	// Popup 原厂弹窗避让状态（车机从 HAL 日志推断）。见 popup.go 的时间语义说明。
+	Popup *ExtPopup `json:"popup"`
 	// 四轮胎压（bar，FL FR RL RR）。
 	// 仪表总线上的 host-etpms-pressure-* 只有 0.1 bar 分辨率（2.4 / 2.4 / 2.4 / 2.4），
 	// 车机 CarProperty 的 TPMS_PRxx 是 kPa，能分辨到 0.01 bar（2.42 / 2.39 / 2.36 / 2.44）。
@@ -410,6 +439,13 @@ type statusDoc struct {
 	// chg 是判定用的原始读数，实车标定枚举时看它
 	Charging bool   `json:"charging"`
 	Chg      string `json:"chg"`
+	// 弹窗避让诊断：L/R=该侧当前是否隐藏（1/0），msL/msR=剩余毫秒，why=触发源。
+	// 实车标定「该隐藏没隐藏 / 不该隐藏却隐藏」时直接看这几个值。
+	PopupL   int    `json:"popupL"`
+	PopupR   int    `json:"popupR"`
+	PopupMsL int64  `json:"popupMsL"`
+	PopupMsR int64  `json:"popupMsR"`
+	PopupWhy string `json:"popupWhy"`
 	Log      string `json:"log"`
 }
 
@@ -451,6 +487,18 @@ func buildStatus(s snapshot, cfg Config, screenOn bool, charging bool, chgRaw st
 		ExtAgeMs:   s.extAgeMs,
 		Charging:   charging,
 		Chg:        chgRaw,
+	}
+	nowMs := time.Now().UnixMilli()
+	if s.pop.leftAt(nowMs) {
+		doc.PopupL = 1
+	}
+	if s.pop.rightAt(nowMs) {
+		doc.PopupR = 1
+	}
+	doc.PopupMsL = s.pop.msLeft(nowMs)
+	doc.PopupMsR = s.pop.msRight(nowMs)
+	if doc.PopupL != 0 || doc.PopupR != 0 {
+		doc.PopupWhy = s.pop.why
 	}
 	if s.tpHi {
 		doc.TpmsSrc = "car"

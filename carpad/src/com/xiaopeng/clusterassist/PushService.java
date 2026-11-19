@@ -186,6 +186,38 @@ public class PushService extends Service {
         }
     };
 
+    /**
+     * 弹窗避让：250ms 看一次检测器版本号，L/R 一翻转就立刻推 ext.json。
+     *
+     * <p>为什么独立一条 tick：弹窗最短只有 2s（空调/音量 OSD），等 10s 主循环早就结束了。
+     * 这条和歌词换行、盲区变化一样走 {@code doPush(true)} 的缓存快路径，不额外读 adb。
+     * 检测器本身由 PopupSource 起 logcat 流，这里只负责「按开关拉起/停掉」和「变化即推」。
+     */
+    private int lastPopupVer = -1;
+    private final Runnable popupTick = new Runnable() {
+        @Override public void run() {
+            // 与 bsdTick 同理：这里抛出异常会让 postDelayed 断链，功能永久失效
+            try {
+                boolean want = prefs != null && prefs.master && prefs.bridge && prefs.popupHide;
+                if (want) {
+                    PopupSource.start(PushService.this);
+                    int v = PopupSource.version();
+                    if (v != lastPopupVer) {
+                        lastPopupVer = v;
+                        doPush(true);   // 状态翻转：跳过 adb 轮询，用缓存值快速落盘
+                    }
+                } else if (PopupSource.running()) {
+                    PopupSource.stop();
+                    lastPopupVer = PopupSource.version();
+                    doPush(true);       // 关掉后补一帧：payload 里不再带 popup，仪表立即恢复显示
+                }
+            } catch (Throwable t) {
+                Log.w("P7Popup", "弹窗轮询异常: " + t);
+            }
+            handler.postDelayed(this, 250);
+        }
+    };
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -207,6 +239,7 @@ public class PushService extends Service {
         handler.post(bsdTick);
         handler.post(chgAnimTick);
         handler.post(tlTick);
+        handler.post(popupTick);
         maybeGrantNotif();
         // 启动 15 秒后做一次仪表端版本自检：APK 覆盖升级只会换车机端代码，
         // 仪表端 /data/p7assist/p7assist 还是老二进制，两边功能会不一致
@@ -490,6 +523,12 @@ public class PushService extends Service {
                     js.append(",\"bsd\":[").append(fbsdL).append(',').append(fbsdR).append(']');
                 }
                 js.append(",\"night\":").append(night);
+                // 原厂弹窗避让：只推「剩余毫秒」不推绝对时刻——仪表 RTC 停在 2019，
+                // 两边时钟差 8 小时，传时间戳会永远被判成过期（红绿灯已经踩过这个坑）。
+                // 仪表按 mtime 当观测时刻本地倒计时，车机停推就自然到期，天然 fail-open。
+                if (prefs != null && prefs.popupHide && PopupSource.running()) {
+                    js.append(",\"popup\":").append(PopupSource.json());
+                }
                 if (wantLyric && LyricSource.fresh()) {
                     js.append(",\"lyric\":{\"cur\":\"").append(esc(LyricSource.cur))
                       .append("\",\"next\":\"").append(esc(LyricSource.next))
@@ -692,6 +731,8 @@ public class PushService extends Service {
         running = false;
         if (handler != null && tick != null) handler.removeCallbacks(tick);
         if (handler != null) handler.removeCallbacks(tlTick);
+        if (handler != null) handler.removeCallbacks(popupTick);
+        PopupSource.stop();   // 别把 logcat 流和那条 adb 连接留成孤儿
         if (deploy != null) deploy.reset();
         super.onDestroy();
     }
