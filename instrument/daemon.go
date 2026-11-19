@@ -62,6 +62,11 @@ type box struct {
 	// 控制视频模式进出的充电判定：非对称去抖（进快出慢），跨轮持久。
 	// chg.on 偶发读到 false 不应立刻退出视频模式——那会触发近 6 秒阻塞 + 黑闪。
 	chgOnDeb chgOnDebounce
+
+	// 连续多少轮「电流和 MCU 状态同时读不到」。短时间读不到时保持上次结论
+	// （防 DBus 偶发超时打断视频），但超过上限必须保守判定为未充电——
+	// 否则一次误判会让 chg.on 永久卡在 true，视频模式再也退不出来。
+	chgBlind int
 }
 
 // pollScreenNight 每 500ms 采样一次原厂画面亮度，带滞回 + 去抖。
@@ -474,12 +479,8 @@ func daemonMain() {
 	lg.Printf("=== p7assist %s start pid=%d dir=%s ===", appVersion, os.Getpid(), dir)
 	os.Remove(stopPath)
 
-	// 充电动画帧包（可选）：没有就回落到渐变背景
-	if loadChargeAnim(dir + "/charge.bin") {
-		lg.Printf("充电动画已载入: %s/charge.bin", dir)
-	} else {
-		lg.Printf("充电动画未载入（%s/charge.bin 缺失或格式不符），充电页用渐变背景", dir)
-	}
+	// charge.bin 内置帧包不再加载：自播兜底与调试静态图都已移除，
+	// 充电页只有"车机投帧"和"本地播放器"两个来源，都没有就不接管、还原原厂。
 
 	cfg, cfgAt, _ := loadConfig(cfgPath)
 	b := &box{cfg: cfg, cfgAt: cfgAt}
@@ -592,6 +593,8 @@ func daemonMain() {
 	// 待升级文件的 (size/mtime) 指纹：只有连续 upgradeHoldS 秒不变才采纳
 	var upSig string
 	var upSince time.Time
+	// 上一次因帧包更新重启播放器的时间（防抖，见视频模式分支）
+	var lastPackRestart time.Time
 	frames := int64(0)
 
 	// 屏幕层开关：关掉时清像素 + FBIOBLANK(4)，原厂画面立即透出
@@ -613,7 +616,7 @@ func daemonMain() {
 		}
 		ensureMode(dir, lg)
 		if d, err := openFB(); err == nil {
-			fb.close()
+			fb.closeQuiet()
 			fb = d
 		} else {
 			lg.Printf("开层: 重开 fb1 失败 %v（沿用旧句柄）", err)
@@ -639,7 +642,7 @@ func daemonMain() {
 			return
 		}
 		if d, err := openFB(); err == nil {
-			fb.close()
+			fb.closeQuiet()
 			fb = d
 			setFGAttrs(fb)
 			layerOn(fb)
@@ -674,12 +677,22 @@ func daemonMain() {
 			return
 		}
 		// restartvideo 文件 -> 重启本地播放器（视频模式下的调试入口）
+		//
+		// 车机「上传资源」推完新帧包也会写这个文件：旧版 daemon 不会自己发现换包，
+		// 没有这个信号就只能让用户先「还原」再「上传」才能换掉内存里的旧帧。
+		// 新版 daemon 的 packChanged 可能已经在同一秒自己重启过一次，
+		// 所以这里和换包重启共用 5 秒冷却，避免一次上传触发两次黑屏。
 		if _, err := os.Stat(dir + "/restartvideo"); err == nil {
 			os.Remove(dir + "/restartvideo")
-			lg.Printf("视频: 收到重启请求")
-			stopVideo(lg)
-			recoverFG("重启播放器") // 不重注册的话新播放器写了也不显示
-			videoTouched = false
+			if time.Since(lastPackRestart) > 5*time.Second {
+				lastPackRestart = now
+				lg.Printf("视频: 收到重启请求")
+				stopVideo(lg)
+				recoverFG("重启播放器") // 不重注册的话新播放器写了也不显示
+				videoTouched = false
+			} else {
+				lg.Printf("视频: 重启请求与换包重启重合，已合并为一次")
+			}
 		}
 		// restart 文件 -> 原地 exec
 		if _, err := os.Stat(restartPath); err == nil {
@@ -704,7 +717,7 @@ func daemonMain() {
 				lg.Printf("reinit: setmode 失败 %v", err)
 			}
 			if d, err := openFB(); err == nil {
-				fb.close()
+				fb.closeQuiet()
 				fb = d
 			} else {
 				lg.Printf("reinit: 重开 fb1 失败 %v", err)
@@ -792,6 +805,9 @@ func daemonMain() {
 		// 必须在本轮任何 fb1 操作之前定性——包括下面的几何自愈、applyOn、blit，
 		// 否则会把播放器刚设好的 fb1 mode / 层状态顶掉，两边互相打断。
 		bs := b.snap()
+		// 视频模式的进入条件：真充电，或用户主动打开「充电页调试」。
+		// 调试必须走视频——当前实现就是本地播放器播 charge.pack，调试静态页没有意义
+		// （用户 2026-11-19 明确指出）。文字层由 chargeView 提供，调试时会用演示数据。
 		chgOnNow := (cfg2.Features.ChargePage && bs.chg.on) || cfg2.Features.ChargeDebug
 		gearHiddenNow := bs.gearOK && bs.gear == 3
 		wantVideo := cfg2.Enabled && chgOnNow && !gearHiddenNow && videoUsable(dir)
@@ -807,6 +823,22 @@ func daemonMain() {
 		}
 		videoMode := videoOn
 		if videoMode {
+			// 三种情况都要重启播放器：换了帧包 / 改了帧率 / 改了写屏方式。
+			// 播放器只在启动时读一次包和参数，不重启就一直按旧的跑。
+			// 重启会黑屏约 4~6 秒（播放器 prime 要重走 setmode），所以加 5 秒冷却防抖。
+			wantRestart, whyRestart := false, ""
+			if packChanged(dir) {
+				wantRestart, whyRestart = true, "帧包已更新("+packSig(dir)+")"
+			} else if tuneChanged(dir) {
+				wantRestart, whyRestart = true, "播放参数已改("+videoTuneNow(dir)+")"
+			}
+			if wantRestart && now.Sub(lastPackRestart) > 5*time.Second {
+				lastPackRestart = now
+				lg.Printf("视频: %s，重启播放器加载新设置", whyRestart)
+				stopVideo(lg)
+				startVideo(dir, lg)
+				videoTouched = true
+			}
 			startVideo(dir, lg)
 			videoTouched = true
 			if overlayDue() {
@@ -861,7 +893,7 @@ func daemonMain() {
 					readSys("stride"), readSys("virtual_size"))
 				ensureMode(dir, lg)
 				if d, err := openFB(); err == nil {
-					fb.close()
+					fb.closeQuiet()
 					fb = d
 					setFGAttrs(fb)
 					layerOn(fb)

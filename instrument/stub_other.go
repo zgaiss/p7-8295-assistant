@@ -15,6 +15,24 @@ func cleanupCmd() {
 
 // 非 Linux 平台桩：PC 上 go test 时 chargeframe.go / config.go / chgoverlay.go
 // 仍会引用这些符号，而 videoplay.go 带 linux build tag 不参与编译。
-func videoRunning() bool   { return false }
-func chgVideoTag() string  { return "" }
+func videoRunning() bool  { return false }
+func chgVideoTag() string { return "" }
+
 const videoOvName = "chgoverlay.jpg"
+
+type videoStats struct {
+	OK         bool
+	RealFps    float64
+	DecMs      float64
+	RenMs      float64
+	WriMs      float64
+	Frames     int
+	Vsync      string
+	PackFrames int
+	PackKB     int
+	WriteMode  string
+	WantFps    string
+	VsyncMode  string
+}
+
+func readVideoStats(dir string) videoStats { return videoStats{} }

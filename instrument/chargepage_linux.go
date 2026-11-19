@@ -87,11 +87,26 @@ func (b *box) pollChargePage(c *busCtx) {
 	curOK := okCur && len(cur) > 0
 	switch {
 	case !curOK && !okMcu:
-		// 两条关键输入都读不到：本轮不可信，保持上一次，绝不推断成"未充电"
-		ci.on = prevOn
+		// 两条关键输入都读不到。前 chgBlindMax 轮保持上次结论，避免 DBus 偶发
+		// 超时直接打断视频；但超过上限必须保守判为未充电，否则一次误判之后
+		// 永远保持 true，视频模式退不出来（2026-11-19 实车复现）。
+		b.chgBlind++
+		if b.chgBlind >= chgBlindMax {
+			ci.on = false
+			b.chgOnDeb.reset()
+		} else {
+			ci.on = prevOn
+		}
 	default:
-		raw := (curOK && ci.cur >= chgCurMinA) ||
-			(okMcu && (mcu == mcuChargingA || mcu == mcuChargingB))
+		b.chgBlind = 0
+		// 判定规则必须与 charge.go 的 chargeProbe.charging() 完全一致：
+		// MCU 状态 / 枪状态任一命中即为充电中；**电流只在两者都读不到时才兜底**。
+		// 之前这里让电流无条件参与，实测 get_host_echarge_cur 会返回 [0,100] 这类
+		// 带占位值的数组，取最大值后 cur=100 ≥ 阈值，于是在 mcu=0（明确未充电）时
+		// 被判成充电中，视频模式无故长开（2026-11-19 实车复现，见 chgraw.json）。
+		raw := (okMcu && (mcu == mcuChargingA || mcu == mcuChargingB)) ||
+			(okGun && gun == chargeGunOn) ||
+			(!okMcu && !okGun && curOK && ci.cur >= chgCurMinA)
 		ci.on = b.chgOnDeb.step(raw, chgOnUpN, chgOnDownN)
 	}
 	ci.ok = okMcu || okGun || okSt
@@ -148,6 +163,17 @@ func (b *box) pollChargePage(c *busCtx) {
 		ci.pile = derivePile(ci)
 		ci.st = deriveState(ci, prev.st)
 		ci.warns = deriveChargeWarns(ci, ci.st, tm)
+		// 未插枪、MCU 未充电、状态机也空闲：DBus 的 echarge_* 仍会返回占位值
+		// （实测 volt=100 / cur=100 / power=10），照单全收会显示成
+		// 「100V / 100A / 10kW / 直流快充 / 一条警示」，与"根本没在充电"的事实矛盾。
+		// 这里统一清零，保证原始数据与界面都回到真实状态。
+		if ci.gun == 0 && ci.mcu == 0 && ci.state == 0 {
+			ci.volt, ci.cur, ci.power = 0, 0, 0
+			ci.leftMin, ci.durMin, ci.sessSec = 0, 0, 0
+			ci.maxPower, ci.maxCur, ci.maxVolt = 0, 0, 0
+			ci.pile = pileUnknown
+			ci.warns = nil
+		}
 		b.s.chg = ci
 	}
 	pageOn := b.cfg.Features.ChargePage || b.cfg.Features.ChargeDebug

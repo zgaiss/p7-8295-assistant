@@ -33,6 +33,11 @@ import (
 const (
 	chgPollMS = 1000
 
+	// 连续这么多轮（每秒一轮）电流与 MCU 状态同时读不到，就保守判为未充电。
+	// 短于此值保持上次结论，防 DBus 偶发超时打断视频模式；超过则强制退出，
+	// 避免一次误判永久卡在"充电中"。
+	chgBlindMax = 10
+
 	// host-vcu-charge-gun-status：0=未插枪 1=已插枪 2=充电中（推断）
 	gunPlugged int32 = 1
 
@@ -289,13 +294,16 @@ func fmtMin(m int) string {
 // p7videoplay 的 overlay 只合成 540 高，再多就会被裁掉底行。
 const chargeVyOff = 80.0
 
-func paintCharge(cv *canvas, cfg Config, s snapshot, tAnim float64) {
+// paintCharge 画整屏充电页。返回 true 表示已接管画面；false 表示没有可用背景
+// （车机断开、也没有兜底帧），调用方应继续画常规组件，把原厂画面还原出来。
+func paintCharge(cv *canvas, cfg Config, s snapshot, tAnim float64) bool {
 	st, ch := chargeView(cfg, s, tAnim)
 	if !paintChargeBg(cv) {
-		return // 无背景资源 → 不接管，原厂画面保持
+		return false // 无背景资源 → 不接管，原厂画面保持
 	}
 	paintChargeWarns(cv, ch.warns)
 	paintChargeBlock(cv, st, ch, cfg.Features.ChargeDebug, chargeVyOff)
+	return true
 }
 
 // chargeView 决定"这一帧要画成什么状态"：真充电数据、调试演示数据、

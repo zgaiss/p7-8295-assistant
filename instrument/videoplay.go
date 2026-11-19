@@ -21,22 +21,27 @@ package main
 // ensureMode + 重开 fb，否则我们的界面就"看不见了"。
 
 import (
+	"fmt"
 	"log"
 	"os"
-	"strconv"
-	"strings"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
 const (
-	videoBinName = "p7videoplay"
+	videoBinName  = "p7videoplay"
 	videoPackName = "charge.pack"
-	videoOvName  = "chgoverlay.jpg"
-	videoFpsArg  = "10"
+	videoOvName   = "chgoverlay.jpg"
+	videoFpsArg   = "10"
+	// 写屏方式开关文件：内容 "mmap" 走内存映射，其它/不存在走播放器默认的 pwrite
+	videoWriteFile = "videowrite"
+	// 垂直同步开关文件：内容 "off" 表示写屏前不等 vsync
+	videoVsyncFile = "videovsync"
 )
 
 var (
@@ -54,6 +59,14 @@ var (
 
 	// 最近一次写 overlay 的时间（每秒一次就够，文字不会这么快变）
 	videoOvAt time.Time
+
+	// 播放器当前内存里那份 charge.pack 的指纹（size:mtime）。
+	// 播放器启动时把整个包 read() 进内存（p7videoplay.c load_pack），之后不再看磁盘，
+	// 所以车机重传新包必须重启它才生效——否则用户得先「还原」再「上传」才看到新动画。
+	videoPackSig string
+
+	// 播放器当前这份启动参数（fps|write）的指纹，见 videoTuneNow
+	videoTuneSig string
 )
 
 // killStaleVideo 启动时清理上一次遗留的播放器。
@@ -120,10 +133,171 @@ func videoFpsNow(dir string) string {
 	return strconv.Itoa(n)
 }
 
+// videoWriteNow 写屏方式：pwrite（默认）或 mmap。
+//
+// 播放器里两条路差一层开销：pwrite 每帧 2.64MB 要走系统调用 + 内核 copy_from_user，
+// mmap 则是把显存直接映射进进程、用 memcpy 写。省的是那次额外拷贝，但快不快取决于
+// 映射的缓存属性（write-combining 才明显快，纯 uncached 逐字节写反而可能更慢），
+// 所以做成可切换、现场用播放器日志里的 wri= 对比，不靠推断。
+func videoWriteNow(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, videoWriteFile))
+	if err != nil {
+		return ""
+	}
+	if strings.TrimSpace(string(b)) == "mmap" {
+		return "mmap"
+	}
+	return ""
+}
+
+// videoStats 解析播放器日志，取最近一次的实测指标。
+//
+// 播放器每 2 秒打一行：
+//
+//	fps=12.3 dec=28.4ms ren=6.1ms wri=41.2ms frames=24
+//
+// 以及启动时的 vsync ioctl=0 errno=0（0 = 支持等垂直同步，-1 = 内核不支持）。
+type videoStats struct {
+	OK         bool
+	RealFps    float64
+	DecMs      float64
+	RenMs      float64
+	WriMs      float64
+	Frames     int
+	Vsync      string
+	PackFrames int
+	PackKB     int
+	WriteMode  string
+	WantFps    string
+	VsyncMode  string
+}
+
+func readVideoStats(dir string) videoStats {
+	var v videoStats
+	v.WriteMode = videoWriteNow(dir)
+	if v.WriteMode == "" {
+		v.WriteMode = "pwrite"
+	}
+	v.WantFps = videoFpsNow(dir)
+	v.VsyncMode = videoVsyncNow(dir)
+
+	// 帧包信息：头 24 字节，偏移 8 起 count/w/h/fps
+	if f, err := os.Open(filepath.Join(dir, videoPackName)); err == nil {
+		var h [24]byte
+		if n, _ := f.Read(h[:]); n == 24 && string(h[0:4]) == "P7VP" {
+			v.PackFrames = int(uint32(h[8]) | uint32(h[9])<<8 | uint32(h[10])<<16 | uint32(h[11])<<24)
+		}
+		if st, err := f.Stat(); err == nil {
+			v.PackKB = int(st.Size() / 1024)
+		}
+		f.Close()
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "log", "p7video.log"))
+	if err != nil {
+		return v
+	}
+	if len(b) > 65536 {
+		b = b[len(b)-65536:]
+	}
+	txt := string(b)
+	if i := strings.Index(txt, "vsync ioctl="); i >= 0 {
+		e := strings.IndexByte(txt[i:], '\n')
+		if e < 0 {
+			e = len(txt) - i
+		}
+		v.Vsync = strings.TrimSpace(txt[i : i+e])
+	}
+	// 最后一行 fps= 统计。
+	// 前面补一个换行：日志被裁剪后第一行可能正好就是统计行，
+	// 不补的话 LastIndex("\nfps=") 会漏掉它、只认到上一次的行。
+	probe := "\n" + txt
+	if i := strings.LastIndex(probe, "\nfps="); i >= 0 {
+		line := probe[i+1:]
+		if j := strings.IndexByte(line, '\n'); j >= 0 {
+			line = line[:j]
+		}
+		var fps, dec, ren, wri float64
+		var fr int
+		n, _ := fmt.Sscanf(line, "fps=%f dec=%fms ren=%fms wri=%fms frames=%d",
+			&fps, &dec, &ren, &wri, &fr)
+		if n == 5 {
+			v.OK, v.RealFps, v.DecMs, v.RenMs, v.WriMs, v.Frames = true, fps, dec, ren, wri, fr
+		}
+	}
+	return v
+}
+
 func videoRunning() bool {
 	videoMu.Lock()
 	defer videoMu.Unlock()
 	return videoCmd != nil
+}
+
+// packSig 帧包指纹：大小 + mtime。车机重传后两者至少有一个会变。
+func packSig(dir string) string {
+	st, err := os.Stat(filepath.Join(dir, videoPackName))
+	if err != nil {
+		return ""
+	}
+	return strconv.FormatInt(st.Size(), 10) + ":" + strconv.FormatInt(st.ModTime().UnixNano(), 10)
+}
+
+// videoVsyncNow 写屏前是否等垂直同步（默认 on，与 C 版播放器一致）。
+//
+// 等 vsync 的好处是撕裂线固定在同一个位置、不随写屏时机乱跳；
+// 代价是帧周期被量化到 16.7ms 的倍数，一帧写不满时可能从 24fps 掉到 20fps。
+// 所以做成可关，现场用播放器日志里的 fps 值对比。
+func videoVsyncNow(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, videoVsyncFile))
+	if err != nil {
+		return "on"
+	}
+	if strings.TrimSpace(string(b)) == "off" {
+		return "off"
+	}
+	return "on"
+}
+
+// videoTuneNow 影响播放器启动参数的现场设置（帧率 + 写屏方式 + vsync）。
+//
+// 这几个值只在 startVideo 时读一次，改了不重启就不会生效。
+// 把它们做成指纹，主循环发现变了就自己重启一次。
+func videoTuneNow(dir string) string {
+	return videoFpsNow(dir) + "|" + videoWriteNow(dir) + "|" + videoVsyncNow(dir)
+}
+
+// tuneChanged 播放器启动后帧率/写屏方式被改过
+func tuneChanged(dir string) bool {
+	videoMu.Lock()
+	running, loaded := videoCmd != nil, videoTuneSig
+	videoMu.Unlock()
+	if !running || loaded == "" {
+		return false
+	}
+	return videoTuneNow(dir) != loaded
+}
+
+// packChanged 播放器启动之后帧包被换过（车机上传了新版本）→ 需要重启播放器
+func packChanged(dir string) bool {
+	videoMu.Lock()
+	running, loaded := videoCmd != nil, videoPackSig
+	videoMu.Unlock()
+	if !running || loaded == "" {
+		return false
+	}
+	cur := packSig(dir)
+	if cur == "" || cur == loaded {
+		return false
+	}
+	// 大小稳定 + 头正确才认，避免上传中途的半截文件引发反复重启
+	if !packHeaderOKAt(filepath.Join(dir, videoPackName)) {
+		return false
+	}
+	if packSig(dir) != cur {
+		return false
+	}
+	return true
 }
 
 // startVideo 拉起播放器；已在跑就什么都不做
@@ -136,19 +310,47 @@ func startVideo(dir string, lg *log.Logger) {
 	bin := filepath.Join(dir, videoBinName)
 	pack := filepath.Join(dir, videoPackName)
 	ov := filepath.Join(dir, videoOvName)
-	cmd := exec.Command(bin, "--pack", pack, "--fps", videoFpsNow(dir), "--overlay", ov, "--verbose")
-	cmd.Dir = dir
-	if f, err := os.OpenFile(filepath.Join(dir, "log", "p7video.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644); err == nil {
-		cmd.Stdout, cmd.Stderr = f, f
+	// FTP 落地默认 644，车机端只在"文件大小变化"时才 SITE CHMOD，大小相同就跳过——
+	// 一旦以 644 落地就再也没有机会修正，表现为 fork/exec: permission denied
+	// （2026-11-19 实车：调试页一直显示静态图，查日志才发现播放器起不来）。
+	// 这里每次启动前补一次 0755，不依赖车机端行为。
+	if err := os.Chmod(bin, 0755); err != nil {
+		lg.Printf("视频: chmod 失败 %v", err)
 	}
+	args := []string{"--pack", pack, "--fps", videoFpsNow(dir), "--overlay", ov, "--verbose"}
+	// 显式传写屏方式：播放器默认是 pwrite，加 --write mmap 才走映射直写。
+	// 不传的时候它永远是 pwrite，mmap 那条分支等于死代码（见 P7 播放器源码 writer 线程）。
+	if w := videoWriteNow(dir); w != "" {
+		args = append(args, "--write", w)
+	}
+	// 显式传 vsync 开关：默认 on，写 off 才关（关掉更容易跑满帧，但撕裂位置随机）
+	args = append(args, "--vsync", videoVsyncNow(dir))
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = dir
+	// 日志自己接管：只保留最后几百行。播放器每 2 秒一行，直接接文件会无限长，
+	// 车机拉日志要整文件传，最后会慢到超时（见 videolog.go）。
+	lgf := newLogRing(filepath.Join(dir, "log", "p7video.log"))
+	lgf.reset()
+	cmd.Stdout, cmd.Stderr = lgf, lgf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// 先取指纹再 Start：启动期间若车机正好换了包，这一轮指纹就是旧的，
+	// 下一轮 packChanged() 会立刻发现并再重启一次，不会漏。
+	sig := packSig(dir)
+	tsig := videoTuneNow(dir)
 	if err := cmd.Start(); err != nil {
 		lg.Printf("视频: 启动失败 %v", err)
 		return
 	}
 	videoCmd = cmd
-	lg.Printf("视频: 已启动 pid=%d pack=%s", cmd.Process.Pid, pack)
+	videoPackSig = sig
+	videoTuneSig = tsig
+	lg.Printf("视频: 已启动 pid=%d pack=%s fps=%s write=%s", cmd.Process.Pid, pack,
+		videoFpsNow(dir), func() string {
+			if w := videoWriteNow(dir); w != "" {
+				return w
+			}
+			return "pwrite"
+		}())
 	c := cmd
 	go func() {
 		err := c.Wait()
@@ -166,6 +368,8 @@ func stopVideo(lg *log.Logger) {
 	videoMu.Lock()
 	c := videoCmd
 	videoCmd = nil
+	videoPackSig = ""
+	videoTuneSig = ""
 	videoMu.Unlock()
 	if c == nil || c.Process == nil {
 		return
