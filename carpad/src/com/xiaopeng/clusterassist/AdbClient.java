@@ -13,6 +13,7 @@ import java.net.Socket;
 import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.interfaces.RSAPublicKey;
+import java.util.ArrayDeque;
 
 /**
  * 极简 adb 客户端：连车机自己的 adbd（127.0.0.1:5050），以 shell 身份执行命令。
@@ -202,6 +203,18 @@ public final class AdbClient {
         final int local;
         int remote = -1;
         ByteArrayOutputStream line = new ByteArrayOutputStream();
+        /**
+         * 已经收全、但还没被取走的行。
+         *
+         * <p>一个 ADB 包（WRTE）经常装好几行——logcat 一次就来十几行。旧实现对包内第一个
+         * {@code '\n'} 直接 return，包里剩下的字节**原地丢掉**：丢的不是可重放的东西，
+         * 是真实事件。弹窗检测靠的就是这些行——按键行被丢 → 该隐藏不隐藏；关门行被丢 →
+         * 检测器一直锁存；盲区探针同理，会漏掉整条状态刷新。
+         * 这里把包内所有完整行排队，readLine 每次只交一行，一个字节都不丢。
+         */
+        final ArrayDeque<String> pending = new ArrayDeque<String>();
+        /** 收到 CLSE 后置位：队列排空了就该返回 null（但已经收到的行必须交完）。 */
+        boolean closed;
 
         ShellStream(int local) { this.local = local; }
 
@@ -209,6 +222,8 @@ public final class AdbClient {
         public synchronized String readLine(int timeoutMs) {
             long deadline = System.currentTimeMillis() + timeoutMs;
             while (true) {
+                if (!pending.isEmpty()) return pending.poll();
+                if (closed) return null;
                 if (System.currentTimeMillis() > deadline) return null;
                 Packet p;
                 try {
@@ -227,22 +242,28 @@ public final class AdbClient {
                         if (p.data != null) {
                             for (byte b : p.data) {
                                 if (b == '\n') {
-                                    String s = new String(line.toByteArray());
+                                    pending.add(new String(line.toByteArray()));
                                     line.reset();
-                                    try { send(CMD_OKAY, local, p.arg0, null); } catch (IOException ignored) { }
-                                    return s;
+                                } else {
+                                    line.write(b);
                                 }
-                                line.write(b);
                             }
                         }
+                        // 每个 WRTE 只回一次 OKAY（协议要求），且要等包内字节全部收下再回
                         try { send(CMD_OKAY, local, p.arg0, null); } catch (IOException ignored) { }
+                        if (!pending.isEmpty()) return pending.poll();
                     } else {
                         try { send(CMD_OKAY, local, p.arg0, null); } catch (IOException ignored) { }
                     }
                     continue;
                 }
                 if (p.cmd == CMD_CLSE) {
-                    if (isMine(p, local, remote)) return null;
+                    if (isMine(p, local, remote)) {
+                        // 先把已经收全的行交出去，再报结束——否则最后一包会整批丢掉
+                        closed = true;
+                        if (!pending.isEmpty()) return pending.poll();
+                        return null;
+                    }
                     continue;
                 }
             }

@@ -34,6 +34,22 @@ public final class PopupSource {
     private static final long STREAM_STALE_MS = 90000L;
     /** 重算节拍：与参考实现一致 */
     private static final long TICK_MS = 200L;
+    /**
+     * 状态持续期间的续租节拍。
+     *
+     * <p>仪表只按「剩余毫秒」本地倒计时。按键连按会把窗口往后延、车门/雷达/N 档确认
+     * 这类锁存态能持续几十秒，这期间 L/R 一直是 1、不翻转 —— 如果只在翻转时推，
+     * 仪表那点余量早就过期，卡片会在弹窗还挂着的时候自己冒出来，等到 10s 慢循环
+     * 才被重新按下去（肉眼看到的就是「闪」）。所以没翻转也要按这个节拍重发。
+     */
+    private static final long RENEW_MS = 1500L;
+    /**
+     * 每次推送给剩余毫秒加的余量。
+     *
+     * <p>必须大于 {@link #RENEW_MS}：否则相邻两跳之间会先到期，仪表闪一帧再被按下去。
+     * 代价是车机被强杀时最多多隐藏这么久 —— 仍然是有界的 fail-open。
+     */
+    private static final long LEASE_PAD_MS = 2500L;
 
     /** 检测状态机。重新 start 时整体换新，避免上一轮的锁存/窗口带进来 */
     private static volatile PopupLogic logic = new PopupLogic();
@@ -48,8 +64,13 @@ public final class PopupSource {
     private static volatile LocalAdb.ShellLink link;
     private static volatile long lastLineAt;
     private static volatile String lastErr = "";
-    /** 状态版本号：L/R 每翻转一次 +1，PushService 靠它判断有没有新状态要推。 */
+    /**
+     * 状态版本号：L/R 翻转一次 +1，状态持续期间按 {@link #RENEW_MS} 续租也 +1。
+     * PushService 只认这个数变没变。
+     */
     private static volatile int version;
+    /** 上一次 bump 版本的时刻（续租节拍用）。 */
+    private static volatile long lastBumpAt;
     private static volatile boolean lastL, lastR;
 
     private PopupSource() { }
@@ -63,6 +84,7 @@ public final class PopupSource {
         logic = new PopupLogic();
         lastL = false;
         lastR = false;
+        lastBumpAt = 0L;
         final Context app = ctx.getApplicationContext();
         Thread t = new Thread(new Runnable() {
             @Override public void run() {
@@ -103,14 +125,15 @@ public final class PopupSource {
         return running;
     }
 
-    /** L/R 翻转计数。PushService 每次比对，变了就立刻推一次 ext.json。 */
+    /** 状态版本：翻转 +1，持续期间续租也 +1。PushService 每次比对，变了就立刻推一次 ext.json。 */
     public static int version() {
         return version;
     }
 
     /** ext.json 的 popup 字段值（只含相对剩余毫秒，不含绝对时刻——两边时钟差 8 小时）。 */
     public static String json() {
-        return logic.json();
+        // 加余量 + 续租序号，原因见 PopupLogic.json(long, int) 与 LEASE_PAD_MS 注释
+        return logic.json(LEASE_PAD_MS, version);
     }
 
     /** 诊断行（实车标定：状态、原因、档位、各窗口余量）。 */
@@ -129,15 +152,28 @@ public final class PopupSource {
         }
     }
 
-    /** L/R 变化时 bump 版本并打一行诊断，方便实车 `logcat -s P7Popup` 核对。 */
+    /**
+     * L/R 变化时 bump 版本；状态持续期间按 {@link #RENEW_MS} 续租也 bump。
+     *
+     * <p>只盯「布尔量翻转」是不够的：仪表侧是纯本地倒计时的，把它续上才叫真的还在弹。
+     * 续租时 payload 里的 msL/msR 会重新按当前剩余算（含余量），仪表据此把截止时刻
+     * 往后推。弹窗结束时 L/R 翻转成 0，立刻推一帧 msL=msR=0，卡片照样马上恢复。
+     */
     private static void syncVersion() {
         boolean l = logic.left();
         boolean r = logic.right();
-        if (l == lastL && r == lastR) return;
+        final long now = System.currentTimeMillis();
+        final boolean flip = (l != lastL || r != lastR);
+        if (!flip) {
+            if (!(l || r)) return;                        // 两侧都没弹窗，不需要续租
+            if (now - lastBumpAt < RENEW_MS) return;      // 还没到续租节拍
+        }
         lastL = l;
         lastR = r;
+        lastBumpAt = now;
         version++;
-        Log.i(TAG, (l || r ? "弹窗出现 " : "弹窗消失 ") + diag() + " msL=" + logic.msLeft() + " msR=" + logic.msRight());
+        Log.i(TAG, (flip ? (l || r ? "弹窗出现 " : "弹窗消失 ") : "续租 ")
+                + diag() + " msL=" + logic.msLeft() + " msR=" + logic.msRight());
     }
 
     private static void streamLoop(Context ctx, int gen) {

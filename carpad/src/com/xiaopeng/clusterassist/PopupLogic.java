@@ -235,15 +235,38 @@ public final class PopupLogic {
         return popL || popR;
     }
 
-    /** 一次采样：直接拼成 ext.json 里的 popup 字段值。 */
+    /** 一次采样：直接拼成 ext.json 里的 popup 字段值（不加余量，供离线回放/测试用）。 */
     public synchronized String json() {
-        long now = System.currentTimeMillis();
-        StringBuilder b = new StringBuilder(72);
+        return json(0L, 0);
+    }
+
+    /** 同 {@link #json(long, int)}，但按调用方给的时刻算（离线回放用假时钟）。 */
+    public synchronized String json(long padMs, int seq) {
+        return jsonAt(System.currentTimeMillis(), padMs, seq);
+    }
+
+    /**
+     * 同上，但给剩余毫秒加 {@code padMs} 余量，并带上续租序号 {@code seq}。
+     *
+     * <p>为什么要余量：仪表只拿「剩余毫秒」本地倒计时，而状态型弹窗（车门 / 雷达 /
+     * N 档确认）的剩余只有保持窗那 0.9s，锁存状态本身却能持续几十秒。车机侧按续租
+     * 节拍重发，每次多发一点余量，两跳之间才不会先到期（见 PopupSource.RENEW_MS）。
+     *
+     * <p>为什么要 {@code seq}：PushService 落盘前按内容去重（相同就 60s 才写一次），
+     * 续租时两跳的 msL 很容易撞上同一个值，内容相同就被去重掉 —— 续租白做，卡片照闪。
+     * 带一个自增值，保证每次续租都算新内容。仪表端不认识这个字段，会直接忽略。
+     */
+    public synchronized String jsonAt(long now, long padMs, int seq) {
+        long ml = msLeftAt(now), mr = msRightAt(now);
+        if (ml > 0 && padMs > 0) ml += padMs;
+        if (mr > 0 && padMs > 0) mr += padMs;
+        StringBuilder b = new StringBuilder(80);
         b.append("{\"L\":").append(popL ? 1 : 0);
         b.append(",\"R\":").append(popR ? 1 : 0);
         b.append(",\"why\":\"").append(popL ? whyL : (popR ? whyR : "")).append('"');
-        b.append(",\"msL\":").append(msLeftAt(now));
-        b.append(",\"msR\":").append(msRightAt(now)).append('}');
+        b.append(",\"msL\":").append(ml);
+        b.append(",\"msR\":").append(mr);
+        b.append(",\"n\":").append(seq).append('}');
         return b.toString();
     }
 
