@@ -7,6 +7,7 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
+import java.util.List;
 
 /**
  * 部署与运维操作：全部通过 FTP 落到仪表 /data/p7assist/。
@@ -30,8 +31,6 @@ public class Deploy {
     public static final String P_BOOTLOG = DIR + "log/boot.log";
     public static final String P_CTL = DIR + "p7assistctl";
     public static final String P_FONTS = DIR + "fonts/Alibaba-PuHuiTi-Regular.ttf";
-    /** 充电动画帧包（121 帧 JPEG，约 5.2MB），供仪表端循环播放 */
-    public static final String P_CHG = DIR + "charge.bin";
     /** 视频模式：仪表本地播放器（静态 ARM）+ P7VP 帧包 */
     public static final String P_PLAYER = DIR + "p7videoplay";
     public static final String P_PACK = DIR + "charge.pack";
@@ -126,16 +125,6 @@ public class Deploy {
         }
     }
 
-    /** 推送充电动画帧包；仪表端已是同一份（大小一致）就跳过。返回上传字节数，0 = 无需上传 */
-    public long pushChargeAnim() throws Exception {
-        long want = assetsSize("charge.bin");
-        if (want <= 0) return 0;
-        if (ftp().size(P_CHG) == want) return 0;
-        File f = assetToFile("charge.bin", "charge.bin");
-        ftp().putFile(P_CHG, f, null);
-        return want;
-    }
-
     /**
      * 视频模式资源：本地播放器 + 帧包。
      *
@@ -147,13 +136,103 @@ public class Deploy {
      */
     public long pushChargeVideo(Ftp.Progress progress) throws Exception {
         long total = 0;
-        total += pushAssetIfDiff("p7videoplay", P_PLAYER, progress);
+        total += pushPlayerIfDiff(progress);
         total += pushAssetIfDiff("charge.pack", P_PACK, progress);
-        if (total > 0) {
-            // FTP 落地是 644，播放器必须可执行；SITE CHMOD 不支持时仪表端会在启动前兜底
-            ftp().chmod(0755, P_PLAYER);
-        }
+        // 无条件补权限：pushAssetIfDiff 在远端大小相同时会跳过，
+        // 早期以 644 落地的文件就再也没机会修正，播放器会一直 permission denied。
+        ftp().chmod(0755, P_PLAYER);
         return total;
+    }
+
+    /**
+     * 播放器按内容 md5 比对，不一致才重传。
+     *
+     * 为什么不能用大小比：换了几版播放器（C 版 2580952、Go 版 1966232）之后又回来改过一次，
+     * 有过两个不同实现大小完全相同的情况，只看大小会把新版判成"已就绪"永远不更新。
+     * 播放器只有 2MB，App 侧算 md5 是毫秒级；远端留一个 playerver 文件存上次的 md5。
+     *
+     * @return 本次上传字节数（0 = 仪表上已经是同一份）
+     */
+    private long pushPlayerIfDiff(Ftp.Progress progress) throws Exception {
+        byte[] b = readAsset("p7videoplay");
+        if (b.length < 100000) return 0;
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+        byte[] d = md.digest(b);
+        StringBuilder sb = new StringBuilder();
+        for (byte x : d) sb.append(String.format("%02x", x));
+        String want = sb.toString();
+
+        String have = null;
+        try {
+            byte[] r = ftp().get(DIR + "playerver");
+            if (r != null) have = new String(r, "UTF-8").trim();
+        } catch (Throwable ignored) {
+            // 文件不存在：当成没版本，走上传
+        }
+        // 双保险：光看 playerver 不够 —— 只要有一处删文件时漏掉标记，
+        // 就会出现"标记说已就绪、文件其实不在"的状态，播放器再也传不上去。
+        // 所以除了 md5 一致，还要求远端文件真的在、大小也对。
+        if (want.equals(have) && ftp().size(P_PLAYER) == b.length) return 0;
+
+        File f = assetToFile("p7videoplay", "p7videoplay.bin");
+        String tmp = P_PLAYER + ".part";
+        ftp().putFile(tmp, f, progress);
+        if (!ftp().rename(tmp, P_PLAYER)) {
+            ftp().delete(P_PLAYER);
+            if (!ftp().rename(tmp, P_PLAYER)) {
+                ftp().putFile(P_PLAYER, f, progress);
+                ftp().delete(tmp);
+            }
+        }
+        ftp().put(DIR + "playerver", want.getBytes("UTF-8"));
+        return b.length;
+    }
+
+    /**
+     * 还原充电动画包：删掉仪表上的本地播放器和帧包。
+     *
+     * 依据：仪表端 daemon 每轮主循环用 videoUsable() 判断资源是否齐备
+     * （p7videoplay > 100KB 且 charge.pack > 100KB）。两个文件删掉之后
+     * videoUsable() 立即为假 → wantVideo 为假 → daemon 在下一轮（50ms）
+     * 自动退出视频模式并 stopVideo() 停掉正在跑的播放器，
+     * 不需要额外下信号，也不会留下继续占着 fb1 的孤儿进程。
+     *
+     * 之后充电时充电页拿不到背景图（paintChargeBg 返回 false），整块不绘制，
+     * 屏幕露出原厂充电界面；要恢复本地动画，点「上传资源」即可从 APK 重新推回。
+     *
+     * 删除结果用 LIST 复核而不是 SIZE：SIZE 在"文件不存在"和"连接失败"时
+     * 都返回 -1，分不清两者，会把断连误报成删除成功。
+     *
+     * @return 本次真正删掉的文件数（0 = 仪表上本来就没有，或 FTP 拒绝了 DELE）
+     */
+    public int restoreChargeVideo() throws Exception {
+        int n = 0;
+        if (ftp().delete(P_PLAYER)) n++;
+        if (ftp().delete(P_PACK)) n++;
+        // 顺带清掉上传中断留下的临时文件
+        ftp().delete(P_PLAYER + ".part");
+        ftp().delete(P_PACK + ".part");
+        // 必须一起删版本标记：playerver 存的是"仪表上那份播放器的 md5"，
+        // 文件删了标记还在，下次「上传资源」会因为 md5 相同直接跳过，
+        // 结果就是播放器永远传不回去（2026-11-20 实车踩到）。
+        ftp().delete(DIR + "playerver");
+        // LIST 失败会抛异常，正好用来区分"真的没有了"和"根本没连上"
+        List<String> names = ftp().list(DIR);
+        boolean playerLeft = false, packLeft = false;
+        for (String line : names) {
+            String f = line.trim();
+            int sp = f.lastIndexOf(' ');
+            if (sp >= 0) f = f.substring(sp + 1);
+            if ("p7videoplay".equals(f)) playerLeft = true;
+            if ("charge.pack".equals(f)) packLeft = true;
+        }
+        if (playerLeft || packLeft) {
+            StringBuilder still = new StringBuilder();
+            if (playerLeft) still.append("p7videoplay");
+            if (packLeft) still.append(still.length() > 0 ? "、charge.pack" : "charge.pack");
+            throw new Exception("删除未生效，仪表上仍有：" + still);
+        }
+        return n;
     }
 
     private long pushAssetIfDiff(String asset, String remote, Ftp.Progress progress) throws Exception {
@@ -161,7 +240,22 @@ public class Deploy {
         if (want <= 0) return 0;
         if (ftp().size(remote) == want) return 0;
         File f = assetToFile(asset, asset.replace('.', '_') + ".bin");
-        ftp().putFile(remote, f, progress);
+        // 先传 <remote>.part 再 RENAME，让替换对仪表端是原子的。
+        //
+        // 仪表 daemon 现在会盯着 charge.pack 的 size/mtime，一变就重启播放器去加载新包
+        // （播放器只在启动时 read() 一次包）。如果这里直接往正文件上覆盖，
+        // daemon 可能在上传中途就看见 mtime 变化，去 load 一个半截包 → 启动失败 → 闪黑。
+        // 走 .part 的话，正文件要么是旧的完整包、要么是新的完整包，中间不存在半截态。
+        String tmp = remote + ".part";
+        ftp().putFile(tmp, f, progress);
+        if (!ftp().rename(tmp, remote)) {
+            // 有些 FTP 实现不允许 RNTO 覆盖已存在文件
+            ftp().delete(remote);
+            if (!ftp().rename(tmp, remote)) {
+                ftp().putFile(remote, f, progress);
+                ftp().delete(tmp);
+            }
+        }
         return want;
     }
 
@@ -180,12 +274,69 @@ public class Deploy {
         ftp().put(DIR + "restartvideo", new byte[]{'1'});
     }
 
+    /**
+     * 设置写屏前是否等垂直同步。
+     *
+     * on：撕裂线固定在同一个位置，但帧周期被量化到 16.7ms 的倍数，
+     *     一帧写不满时可能从 24fps 掉到 20fps；off：更容易跑满，撕裂位置随机。
+     */
+    public void setVideoVsync(String mode) throws Exception {
+        if ("off".equals(mode)) {
+            ftp().put(DIR + "videovsync", "off".getBytes("UTF-8"));
+        } else {
+            ftp().delete(DIR + "videovsync");
+        }
+        ftp().put(DIR + "restartvideo", new byte[]{'1'});
+    }
+
+    /**
+     * 设置写屏方式：pwrite（播放器默认）或 mmap。
+     *
+     * 播放器里两条路：pwrite 每帧要走系统调用 + 内核 copy_from_user；
+     * mmap 把显存映射进进程直接 memcpy，少一次拷贝。快不快取决于映射的缓存属性，
+     * 所以做成可切换、用「刷新状态」里的写屏耗时实测对比，别靠猜。
+     */
+    public void setVideoWrite(String mode) throws Exception {
+        if ("mmap".equals(mode)) {
+            ftp().put(DIR + "videowrite", "mmap".getBytes("UTF-8"));
+        } else {
+            // 删文件即回到播放器默认的 pwrite
+            ftp().delete(DIR + "videowrite");
+        }
+        ftp().put(DIR + "restartvideo", new byte[]{'1'});
+    }
+
     /** 仪表端视频资源大小：[播放器, 帧包]，缺失为 0 */
     public long[] videoResSize() {
         try {
             return new long[]{ftp().size(P_PLAYER), ftp().size(P_PACK)};
         } catch (Throwable t) {
             return new long[]{0, 0};
+        }
+    }
+
+    /**
+     * 诊断用：[播放器, 帧包, 播放器.part, 帧包.part] 的远端大小。
+     *
+     * .part 有值说明上传正在进行或中途断掉 —— 这时候「检查资源」会看到正文件缺失，
+     * 很容易误判成"没传上去"，其实是还没传完。
+     */
+    public long[] videoResDiag() {
+        try {
+            return new long[]{ftp().size(P_PLAYER), ftp().size(P_PACK),
+                    ftp().size(P_PLAYER + ".part"), ftp().size(P_PACK + ".part")};
+        } catch (Throwable t) {
+            return new long[]{0, 0, 0, 0};
+        }
+    }
+
+    /** 仪表上记录的播放器版本（md5），空 = 没有记录 */
+    public String remotePlayerVer() {
+        try {
+            byte[] b = ftp().get(DIR + "playerver");
+            return b == null ? "" : new String(b, "UTF-8").trim();
+        } catch (Throwable t) {
+            return "";
         }
     }
 
@@ -242,11 +393,16 @@ public class Deploy {
             ftp().chmod(0755, f);
         }
         pushBinary(progress);
-        // 视频模式资源（播放器 ~2.5MB + 帧包 ~4MB）：首次部署就带上，
+        // 视频模式资源（播放器 + 帧包）：首次部署就带上，
         // 之后开通充电页时按大小比对，一致就不再传
         try {
             if (pushChargeVideo(progress) > 0) {
                 ftp().chmod(0755, P_PLAYER);
+                // 换了包就让仪表重启一次播放器。播放器只在启动时把 charge.pack
+                // 整个读进内存，不重启就一直播旧帧（以前要「还原」再「上传」才换得掉）。
+                // 新版 daemon 自己会发现换包，但这里发出的信号对旧版同样有效，
+                // 两边共用 5 秒冷却，不会重复黑屏。
+                requestRestartVideo();
             }
         } catch (Throwable ignored) { }
         if (ftp().size(P_CFG) <= 0) {

@@ -41,7 +41,7 @@ public class Ftp implements Transport {
 
     private void ensure() throws IOException {
         if (ctrl != null && ctrl.isConnected() && !ctrl.isClosed()) return;
-        closeQuietly();
+        dropQuietly();
         Socket s = new Socket();
         s.connect(new InetSocketAddress(host, port), 6000);
         s.setSoTimeout(15000);
@@ -75,16 +75,32 @@ public class Ftp implements Transport {
     }
 
     private String reply(String cmd) throws IOException {
-        cout.write((cmd + "\r\n").getBytes("UTF-8"));
-        cout.flush();
-        String line = readLine();
+        String first;
+        try {
+            cout.write((cmd + "\r\n").getBytes("UTF-8"));
+            cout.flush();
+            first = readLine();
+        } catch (IOException e) {
+            // 连接已被服务端回收（空闲超时最常见）。TCP 半关闭时 isConnected()
+            // 仍返回 true，ensure() 不会重建，坏连接就会被一直复用，
+            // 后面每个命令都失败——现场表现就是"过一会儿什么都读不到"。
+            // 所以一旦读写失败就立刻丢弃连接，让下一次 ensure() 重连。
+            dropQuietly();
+            throw e;
+        }
+        String line = first;
         // 多行应答：123-... 直到 123 空格
         if (line.length() > 3 && line.charAt(3) == '-') {
             String code = line.substring(0, 3);
-            while (true) {
-                String l = readLine();
-                line = l;
-                if (l.startsWith(code + " ")) break;
+            try {
+                while (true) {
+                    String l = readLine();
+                    line = l;
+                    if (l.startsWith(code + " ")) break;
+                }
+            } catch (IOException e) {
+                dropQuietly();
+                throw e;
             }
         }
         return line;
@@ -101,6 +117,9 @@ public class Ftp implements Transport {
         int po = Integer.parseInt(p[4].trim()) * 256 + Integer.parseInt(p[5].trim());
         Socket d = new Socket();
         d.connect(new InetSocketAddress(ip, po), 6000);
+        // 数据连接也要有超时：不设的话读不到数据就永久挂着，
+        // 车机上表现成"点了播放器日志一直转圈"。
+        d.setSoTimeout(20000);
         return d;
     }
 
@@ -160,6 +179,18 @@ public class Ftp implements Transport {
 
     @Override
     public byte[] get(String remote) throws IOException {
+        try {
+            return getOnce(remote);
+        } catch (IOException e) {
+            // 重试一次：多数失败是长连接被服务端回收，丢掉坏连接重建就能成功。
+            // 数据连接也可能是上一轮的残留状态（比如文件被正在写的进程截断），
+            // 重来一遍同样是干净的。
+            dropQuietly();
+            return getOnce(remote);
+        }
+    }
+
+    private byte[] getOnce(String remote) throws IOException {
         synchronized (lock) {
             ensure();
             Socket d = pasv();
@@ -302,6 +333,22 @@ public class Ftp implements Transport {
     @Override
     public void close() {
         closeQuietly();
+    }
+
+    /**
+     * 直接丢弃连接，不尝试礼貌退出。
+     *
+     * 连接已经坏掉时（对端 FIN、RST、超时）再写 QUIT 只会阻塞或二次报错，
+     * 所以这里只关 socket 并把引用清空，让下次 ensure() 重新建连。
+     */
+    private void dropQuietly() {
+        try {
+            if (ctrl != null) ctrl.close();
+        } catch (Throwable ignored) {
+        }
+        ctrl = null;
+        cin = null;
+        cout = null;
     }
 
     private void closeQuietly() {

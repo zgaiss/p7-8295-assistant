@@ -936,8 +936,7 @@ public class MainActivity extends Activity {
 
         p.addView(ui.sep());
         p.addView(ui.group("播放器"));
-        p.addView(ui.hint("动画由仪表本地播放器渲染：帧包一次性传到仪表、本地循环播放，车机不再逐帧推。"
-                + "帧率越低，整帧写屏的次数越少，fb1 单缓冲的撕裂越轻——代价是动画变慢。"));
+        p.addView(ui.hint("动画由仪表本地播放器渲染：帧包一次性传到仪表、本地循环播放，车机不再逐帧推。"));
         tvChgAnim = ui.hint("");
         tvChgAnim.setTextColor(ui.textSub);
         p.addView(tvChgAnim);
@@ -947,11 +946,13 @@ public class MainActivity extends Activity {
                 }),
                 ui.button("上传资源", true, new View.OnClickListener() {
                     @Override public void onClick(View v) { pushVideoRes(); }
+                }),
+                ui.button("还原", false, new View.OnClickListener() {
+                    @Override public void onClick(View v) { restoreVideoRes(); }
                 })
         ));
 
-        p.addView(ui.hint("帧率（改完自动重启播放器，约 3 秒生效）。"
-                + "参考：10fps 约每秒撕 1 次，24fps 约 4~10 次"));
+        p.addView(ui.hint("帧率"));
         p.addView(ui.buttonRow(
                 ui.button("8", false, fpsBtn(8)),
                 ui.button("10", false, fpsBtn(10)),
@@ -976,6 +977,22 @@ public class MainActivity extends Activity {
                 ui.button("播放器日志", false, new View.OnClickListener() {
                     @Override public void onClick(View v) { showVideoLog(); }
                 })
+        ));
+
+        p.addView(ui.hint("写屏方式（切换后仪表自动重启播放器，约 5 秒黑屏）。"
+                + "pwrite 走系统调用把整帧拷进显存；mmap 把显存映射进进程直接写，少一次拷贝。"
+                + "切完点上面「刷新状态」对比「写屏」那一项的耗时，哪个低用哪个。"));
+        p.addView(ui.buttonRow(
+                ui.button("写屏 pwrite", false, writeBtn("pwrite")),
+                ui.button("写屏 mmap", false, writeBtn("mmap"))
+        ));
+
+        p.addView(ui.hint("垂直同步（切换后同样会自动重启播放器）。"
+                + "on：每次写屏前等 VSYNC，撕裂线固定在同一个位置；"
+                + "off：不等，更容易跑满帧，但撕裂位置随机。帧率上不去时先试 off。"));
+        p.addView(ui.buttonRow(
+                ui.button("同步 on", false, vsyncBtn("on")),
+                ui.button("同步 off", false, vsyncBtn("off"))
         ));
 
         p.addView(ui.sep());
@@ -1050,10 +1067,12 @@ public class MainActivity extends Activity {
                 try {
                     long n = deploy.pushChargeVideo(null);
                     if (n > 0) {
+                        // 换了包必须让播放器重启，否则它还在播内存里的旧帧
+                        try { deploy.requestRestartVideo(); } catch (Throwable ignored) { }
                         final long mb = Math.max(1, n / 1048576);
                         runOnUiThread(new Runnable() {
                             @Override public void run() {
-                                toast("视频资源已上传 " + mb + "MB，仪表将本地 24fps 播放");
+                                toast("视频资源已上传 " + mb + "MB，仪表正在重启播放器");
                             }
                         });
                     }
@@ -1077,17 +1096,28 @@ public class MainActivity extends Activity {
                 String r;
                 try {
                     org.json.JSONObject st = deploy.status();
-                    long[] sz = deploy.videoResSize();
-                    boolean ok = sz[0] > 100000 && sz[1] > 100000;
+                    long[] sz = deploy.videoResDiag();
+                    long player = sz[0], pack = sz[1], pPart = sz[2], kPart = sz[3];
+                    boolean ok = player > 100000 && pack > 100000;
                     String v = st.optString("chgVideo", "");
                     String mode = "vplay".equals(v) ? "本地播放器接管整屏"
                             : ("screen".equals(st.optString("chgMode", "")) ? "逐帧投屏（回落通道）"
-                            : "未接管（没充电或充电页开关没开）");
-                    r = (ok ? "✅ 资源就位：" : "⚠️ 资源缺失：")
-                            + "播放器 " + (sz[0] / 1024) + "KB　帧包 " + (sz[1] / 1024) + "KB"
-                            + "\n当前模式：" + mode
-                            + "\n仪表版本：" + st.optString("version", "?");
-                    if (!ok) r += "\n点「上传资源」推一次（约 6MB）";
+                            : "未接管（没充电、或充电页开关没开、或资源不齐）");
+                    StringBuilder b = new StringBuilder();
+                    b.append(ok ? "✅ 资源就位：" : "⚠️ 资源缺失：");
+                    b.append("\n播放器 ").append(player > 0 ? (player / 1024) + " KB" : "无")
+                     .append("　帧包 ").append(pack > 0 ? (pack / 1024) + " KB" : "无");
+                    if (pPart > 0 || kPart > 0) {
+                        b.append("\n正在上传：播放器 ").append(pPart / 1024).append(" KB")
+                         .append("　帧包 ").append(kPart / 1024).append(" KB")
+                         .append("\n（.part 有值 = 还没传完，等它变成正式文件再看）");
+                    }
+                    b.append("\n当前模式：").append(mode);
+                    b.append("\n仪表版本：").append(st.optString("version", "?"));
+                    String pv = deploy.remotePlayerVer();
+                    if (!pv.isEmpty()) b.append("\n播放器版本：").append(pv.substring(0, Math.min(8, pv.length())));
+                    if (!ok) b.append("\n点「上传资源」推一次（播放器 2MB + 帧包 35MB）");
+                    r = b.toString();
                 } catch (Throwable t) {
                     r = "读不到仪表状态：" + t.getMessage();
                 }
@@ -1106,6 +1136,60 @@ public class MainActivity extends Activity {
         };
     }
 
+    /** 写屏方式按钮：写 videowrite，仪表会把播放器重启一遍 */
+    private View.OnClickListener writeBtn(final String mode) {
+        return new View.OnClickListener() {
+            @Override public void onClick(View v) { setVideoWrite(mode); }
+        };
+    }
+
+    private void setVideoWrite(final String mode) {
+        final String label = "mmap".equals(mode) ? "mmap" : "pwrite";
+        toast("正在切换写屏方式：" + label + "…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String m;
+                try {
+                    deploy.setVideoWrite(mode);
+                    m = "已切到 " + label + "，播放器重启中（约 5 秒），之后点「刷新状态」对比写屏耗时";
+                } catch (Throwable t) {
+                    m = "切换失败：" + t.getMessage();
+                }
+                final String out = m;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { toast(out); }
+                });
+            }
+        }).start();
+    }
+
+    /** 垂直同步开关：写 videovsync，仪表会把播放器重启一遍 */
+    private View.OnClickListener vsyncBtn(final String mode) {
+        return new View.OnClickListener() {
+            @Override public void onClick(View v) { setVideoVsync(mode); }
+        };
+    }
+
+    private void setVideoVsync(final String mode) {
+        final String label = "off".equals(mode) ? "关" : "开";
+        toast("正在设置垂直同步：" + label + "…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String m;
+                try {
+                    deploy.setVideoVsync(mode);
+                    m = "垂直同步已" + label + "，播放器重启中（约 5 秒），之后点「刷新状态」看实测帧率";
+                } catch (Throwable t) {
+                    m = "设置失败：" + t.getMessage();
+                }
+                final String out = m;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { toast(out); }
+                });
+            }
+        }).start();
+    }
+
     private void setVideoFps(final int fps) {
         toast("正在设置 " + fps + "fps…");
         new Thread(new Runnable() {
@@ -1113,7 +1197,7 @@ public class MainActivity extends Activity {
                 String m;
                 try {
                     deploy.setVideoFps(fps);
-                    m = "已设为 " + fps + "fps，播放器重启中（约 3 秒）";
+                    m = "已设为 " + fps + "fps，播放器重启中（约 5 秒）";
                 } catch (Throwable t) {
                     m = "设置失败：" + t.getMessage();
                 }
@@ -1144,30 +1228,45 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** 读播放器日志：看仪表端真实 fps / 解码 / 缩放 / 写屏耗时 */
+    /**
+     * 读播放器日志：看仪表端真实 fps / 解码 / 缩放 / 写屏耗时。
+     *
+     * 失败时再自动重试一次（Ftp 内部也会重建连接）：这类失败绝大多数是
+     * 长连接空闲被服务端回收，不是仪表上真没有日志。
+     */
     private void showVideoLog() {
         if (tvCastDbg == null) return;
         tvCastDbg.setText("读取播放器日志…");
         new Thread(new Runnable() {
             @Override public void run() {
-                final String t = deploy.videoLogTail(1200);
+                String t = deploy.videoLogTail(1200);
+                if (t == null) t = deploy.videoLogTail(1200);
+                final String out = t;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        tvCastDbg.setText(t == null || t.trim().isEmpty()
-                                ? "读不到播放器日志（仪表可能还没启动过本地播放）" : t);
+                        tvCastDbg.setText(out == null || out.trim().isEmpty()
+                                ? "读不到播放器日志：仪表上没有日志文件，或 FTP 连接异常（可再点一次）"
+                                : out);
                     }
                 });
             }
         }).start();
     }
 
-    /** 投屏调试：把车机发送侧 + 仪表接收侧的状态拼在一起 */
+    /**
+     * 投屏调试：把车机发送侧 + 仪表接收侧的真实状态拼在一起。
+     *
+     * 视频模式下一切数据都取自仪表上报的实测值（chgWantFps / chgRealFps / chgDecMs …），
+     * 不再写死"24fps"这种会过期的说明——之前那版就是照着旧参数写的，一改帧率就全错。
+     */
     private void refreshCastDebug() {
         if (tvCastDbg == null) return;
         tvCastDbg.setText("读取中…");
         new Thread(new Runnable() {
             @Override public void run() {
-                String send = ChargeAnim.debugText();
+                // 车机侧已经不再推帧（逐帧投帧通道 2026-11-20 移除），
+                // 所以这里固定说明，不再去读一个永远不动的发送统计。
+                String send = "车机：不推帧（动画只走仪表本地播放器）";
                 String recv;
                 try {
                     org.json.JSONObject st = deploy.status();
@@ -1175,18 +1274,58 @@ public class MainActivity extends Activity {
                     String mode = st.optString("chgMode", "");
                     int age = st.optInt("chgFrmAgeMs", -1);
                     int kb = st.optInt("chgFrmKB", 0);
+                    String ver = st.optString("version", "?");
                     if ("vplay".equals(video)) {
-                        recv = "仪表：本地播放器接管（帧包在仪表本地按 24fps 播放，文字层每秒刷新）"
-                                + "\n—— 这时候车机不推帧，画面靠仪表自己跑";
+                        StringBuilder b = new StringBuilder();
+                        b.append("仪表：本地播放器接管整屏（version ").append(ver).append("）");
+                        String want = st.optString("chgWantFps", "");
+                        String write = st.optString("chgWrite", "");
+                        int packFrames = st.optInt("chgPackFrames", 0);
+                        int packKB = st.optInt("chgPackKB", 0);
+                        boolean statsOk = st.optBoolean("chgStatsOk", false);
+                        if (packFrames > 0) {
+                            b.append("\n帧包：").append(packFrames).append(" 帧 / ")
+                             .append(packKB / 1024).append(" MB");
+                        }
+                        if (!want.isEmpty()) {
+                            b.append("　目标 ").append(want).append(" fps");
+                        }
+                        if (!write.isEmpty()) {
+                            b.append("　写屏 ").append(write);
+                        }
+                        if (statsOk) {
+                            double real = st.optDouble("chgRealFps", 0);
+                            double dec = st.optDouble("chgDecMs", 0);
+                            double ren = st.optDouble("chgRenMs", 0);
+                            double wri = st.optDouble("chgWriMs", 0);
+                            b.append(String.format(java.util.Locale.US,
+                                    "\n实测 %.1f fps　解码 %.1fms　缩放 %.1fms　写屏 %.1fms", real, dec, ren, wri));
+                            // 写屏占单帧周期的比例：越接近 100%，撕裂几乎每帧都会出现
+                            if (real > 0.1) {
+                                double duty = wri * real / 10.0;
+                                b.append("\n写屏占空比 ").append(Math.round(duty)).append("%");
+                                if (duty >= 90) b.append("（几乎每帧都写满整个周期）");
+                            }
+                            b.append("\n主要耗时：").append(
+                                    wri >= dec && wri >= ren ? "写屏（换编码省不掉）"
+                                  : dec >= ren ? "JPEG 解码（换 RGB565 可省）" : "缩放/转 565（换 RGB565 可省）");
+                        } else {
+                            b.append("\n还没读到统计行（播放器启动后约 2 秒出第一行）");
+                        }
+                        String vsync = st.optString("chgVsync", "");
+                        if (!vsync.isEmpty()) {
+                            b.append("\n").append(vsync);
+                            b.append(vsync.contains("ioctl=0") ? "（支持等垂直同步）" : "（内核不支持，等了个空）");
+                        }
+                        b.append("\n—— 这个模式下汽车机不推帧，画面全靠仪表自己跑");
+                        recv = b.toString();
                     } else if ("screen".equals(mode)) {
                         recv = "仪表：投屏接收中（" + (age >= 0 ? age + " 毫秒前" : "刚刚")
                                 + "收到一帧，" + kb + " KB）";
-                    } else if ("selfplay".equals(mode)) {
-                        recv = "仪表：在自己播内置帧包（说明车机这边没发帧，或刚暂停过）";
                     } else if ("none".equals(mode)) {
                         recv = "仪表：没有可用帧（不会接管充电页，保持原厂画面）";
                     } else {
-                        recv = "仪表：状态未知（仪表端可能还是旧版本）";
+                        recv = "仪表：状态未知（version " + ver + "，可能还是旧版本）";
                     }
                 } catch (Throwable t) {
                     recv = "仪表：读取失败（" + t.getMessage() + "）";
@@ -1266,17 +1405,42 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** 上传播放器 + 帧包（约 6MB，两边一致时自动跳过） */
+    /**
+     * 上传播放器 + 帧包（约 14MB，两边一致时自动跳过）。
+     *
+     * 传完主动让仪表重启播放器：播放器启动时把 charge.pack 整个读进内存，
+     * 不重启就还在播旧帧——这就是以前「必须先还原再上传」才换得掉的原因。
+     */
     private void pushVideoRes() {
         if (tvChgAnim == null) return;
-        tvChgAnim.setText("正在上传播放器 + 帧包（约 6MB）…");
+        tvChgAnim.setText("正在上传播放器 + 帧包（播放器 2MB + 帧包 35MB，慢的话等几分钟）…");
         new Thread(new Runnable() {
             @Override public void run() {
                 String r;
                 try {
-                    long n = deploy.pushChargeVideo(null);
-                    r = n > 0 ? "✅ 已上传 " + (n / 1024) + " KB，重启播放器后生效"
-                              : "ℹ️ 仪表端已是同一份资源，无需重传";
+                    final long[] lastKb = {0};
+                    long n = deploy.pushChargeVideo(new Ftp.Progress() {
+                        @Override public void onProgress(long sent, long total) {
+                            final long kb = sent / 1024, tkb = total / 1024;
+                            if (sent < total && kb - lastKb[0] < 1024) return;
+                            lastKb[0] = kb;
+                            runOnUiThread(new Runnable() {
+                                @Override public void run() {
+                                    if (tvChgAnim != null) {
+                                        tvChgAnim.setText("上传中 " + kb + " KB / " + tkb + " KB…");
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    if (n > 0) {
+                        // 新版 daemon 会自己发现换包；这行对旧版 daemon 是唯一生效路径。
+                        // 两边共用 5 秒冷却，重合时只重启一次。
+                        try { deploy.requestRestartVideo(); } catch (Throwable ignored) { }
+                        r = "✅ 已上传 " + (n / 1024) + " KB，仪表正在重启播放器（约 5 秒黑屏后生效）";
+                    } else {
+                        r = "ℹ️ 仪表端已是同一份资源，无需重传";
+                    }
                 } catch (Throwable t) {
                     r = "❌ 上传失败：" + t.getMessage();
                 }
@@ -1286,6 +1450,46 @@ public class MainActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+    /** 还原充电动画包：先确认再删仪表上的播放器与帧包（可逆，重新上传即可恢复） */
+    private void restoreVideoRes() {
+        if (tvChgAnim == null) return;
+        new AlertDialog.Builder(this)
+                .setTitle("还原充电动画包")
+                .setMessage("将从仪表删除本地播放器和帧包（p7videoplay / charge.pack）。\n\n"
+                        + "· 仪表会在 1 秒内退出视频模式、停掉播放器\n"
+                        + "· 之后充电时不再本地播动画；若上面「充电界面」开关仍开着，"
+                        + "会退回车机逐帧投屏（约 11fps）\n"
+                        + "· 想完全回到原厂充电界面，把「充电界面」开关一起关掉\n"
+                        + "· 想恢复本地动画，点「上传资源」重新推回即可（约 6MB）\n\n"
+                        + "助手的其他功能不受影响。")
+                .setPositiveButton("还原", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int w) { doRestoreVideoRes(); }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doRestoreVideoRes() {
+        if (tvChgAnim == null) return;
+        tvChgAnim.setText("正在还原…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String r;
+                try {
+                    int n = deploy.restoreChargeVideo();
+                    r = n > 0 ? "✅ 已还原：删除 " + n + " 个文件，仪表已退出视频模式"
+                              : "ℹ️ 仪表上本来就没有动画包，无需还原";
+                } catch (Throwable t) {
+                    r = "❌ 还原失败：" + t.getMessage();
+                }
+                final String out = r;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { tvChgAnim.setText(out); }
+                });
+            }
+        }, "p7-videores-restore").start();
     }
 
     private LinearLayout buildDebugPage() {
