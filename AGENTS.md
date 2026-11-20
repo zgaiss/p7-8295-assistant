@@ -139,7 +139,7 @@ Agent 接到任务时若没有对应 Issue，**应先建 Issue 并把编号回�
       —— `fb.go` 有 5 处 `unsafe.Pointer` 是刻意为之（framebuffer 映射），不加 `-unsafeptr=false` 会误报
 - [ ] **无敏感信息**：不新增签名私钥、口令、内网 IP、设备序列号、个人邮箱、访问令牌
 - [ ] **无构建产物**：`dist/`、`carpad/build/`、`analysis/`、`*.apk`、`*.zip`、大体积工具链都不入库
-- [ ] **版本号三处一致**（见第 9 节）
+- [ ] **版本唯一来源与APK内嵌仪表一致**（见第 9 节）
 - [ ] `.gitignore` 未被放宽来"顺手带进去"某个产物
 
 提交前用 `git status --porcelain` 逐条看过将要入库的文件，不要习惯性 `git add -A`。
@@ -200,7 +200,7 @@ PR 描述必须包含：
 PR 合并进 `main` 后，立刻对照 `main` 的最新内容再核一次 README：
 
 - [ ] 目录清单与 `git ls-tree --name-only main` 一致
-- [ ] 版本号与 `instrument/config.go` 的 `appVersion`、两个构建脚本一致
+- [ ] 版本仅从manifest读取；两个打包入口使用快照并验证内嵌仪表与APK版本
 - [ ] 构建命令按当前路径能跑通
 - [ ] 没有描述已删除的功能、没有引用已删除的文件
 
@@ -244,17 +244,14 @@ git diff --stat origin/main...HEAD   # 先看范围是否符合 Issue 描述
 
 ---
 
-## 9. 版本号必须三处同步
+## 9. 版本号唯一来源
 
-以下三处版本号必须完全一致，否则 APK 会反复给仪表推送二进制：
-
-| 位置 | 字段 |
-|---|---|
-| `instrument/config.go` | `appVersion` |
-| `carpad/build.sh` | `--version-code` / `--version-name` |
-| `carpad/build-mac.sh` | `--version-code` / `--version-name` |
-
-改版本时三处一起改，同步更新 README 标题与 APK 文件名，并在 PR 中说明版本号变化。
+只修改 `carpad/AndroidManifest.xml` 的 versionName/versionCode。
+`tools/build_version.py` 快照该文件，并把versionName注入仪表appVersion；
+两个APK构建脚本必须使用同一快照，不再另写AAPT2版本fallback参数。
+独立APK构建也必须重新编译仪表，禁止静默打包tracked旧资产。
+签名前后核对编译APK版本与内嵌仪表hash，通过后才能发布到dist。
+原始go build默认dev-unversioned，不是发布构建。README版本说明同步更新。
 
 ---
 

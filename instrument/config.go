@@ -15,7 +15,8 @@ import (
 	"time"
 )
 
-const appVersion = "2.12.4"
+// Injected from AndroidManifest.xml by tools/build_version.py. Raw go builds are not release builds.
+var appVersion = "dev-unversioned"
 
 // buildTag 显示在充电页右下角（仅调试模式），用来区分同版本号的不同构建
 const buildTag = "b2026-11-18q"
