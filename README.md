@@ -224,6 +224,43 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
    配置在 `config.json` 的 `video` 段：`{"enable": true, "port": 9002}`。
    **默认关闭**，且字段缺失按关闭处理——影像会盖住半屏，不能像 `popupHide` 那样"缺失即开"。
 
+   车机端取哪一路视野（`carpad/.../AvmMode.java` + `MirrorSource.java`）：
+   - 车机把 AVM 合成画面当**一路虚拟相机**（cameraId=0 / `video51`）暴露，不是四路独立物理相机；
+     打灯要的侧后广角靠切 `display-mode=8`（2×2 四宫格）再裁象限拿到。
+   - **切不到鱼眼有两层根因（V5.10.0.8814 真机实测，对照能出鱼眼的 P7打灯转向辅助 v1.46）**，
+     缺一不可：
+     1. **只写裸 `display-mode` —— 千万别补配套字段**：v1.46 下发原文就是
+        `params =display-mode=8`，紧接着 `XpCameraCmdController: setAvmControlMode()` 被触发、
+        打印 `displaymode:8, Overlaywkst:-1,...`（配套全 -1=未设），随后 connect camera 0
+        出四路鱼眼。反之补齐 `overlay-workst/out-mode/transbody` 等字段时，controller 的
+        `setAvmControlMode()` 根本不被调用，视角停在三分屏——**"参数不完整被丢弃"是错判，
+        多写字段才是毒药**。`AvmMode` 现刻意只写裸字段，普通 `set` 优先、`earlyset` 兜底。
+     2. **下发与取流必须同源（cameraId 一致）**：`display-mode=8` 只作用于 cameraId=0
+        那一路流（真机 logcat `setCmdControlParameters ... cameraId =0`）。若打灯取流打开的是
+        cameraId=1，四宫格根本不在这路上，表现为「下发成功但画面不变」。原仓库同样是
+        「下发 0 + openCamera ids[0]=video51」，且注明 ids[1]/video52 画面会缺一块。现在
+        `mirrorAvm` 打开时强制用 camera 0 取流，避免左右灯分设 0/1 导致右灯取错路。
+     下发成功即按四宫格裁（左灯左下格、右灯右下格），失败退回三分屏侧栏 ROI。
+     排查手法：`adb logcat` 里搜 `XpCameraCmdController`——有 `setAvmControlMode()` 就是
+     controller 真生效了；只有 `CameraService: setCmdControlParameters` 而没这行，就是
+     下发的字段让 controller 拒绝了。
+     调试口：`am broadcast -f 0x01000000 -a com.xiaopeng.clusterassist.AVM --ei mode 8
+     --ez dump true`（`-f` 是前台广播标志，否则被后台执行限制拦掉）。
+   - **取景偏向车尾（APP 内可调）**：四宫格每格默认整格=该侧完整鱼眼。真机调定「放大 2 倍
+     突出车尾、舍弃车头」：右灯窗口右移 `panx=+0.8`、左灯因鱼眼镜像取 `-0.8`，各存一套不共用。
+     **调节入口**：APP「显示」页 →「取景微调（放大车尾，舍弃车头）」区：
+       - 总开关：开=按参数微调，关=整格显示完整鱼眼。
+       - 左右各三组步进器（放大倍数 1.0~3.0 / 左右偏向 −1~+1 / 上下偏向 −1~+1），
+         点 `−`/`+` 每次 0.1，**打灯状态下实时生效下一帧就变**，并自动存盘（改完不用装机）。
+       - 「复位默认」按钮恢复出厂值（右 2.0/+0.8、左 2.0/−0.8）。
+       参数落在 SharedPreferences 的 `quad*` 键，进程重启后打灯时自动恢复。
+     **adb 调试口**（等价、无需打开 APP）：`am broadcast -f 0x01000000 -a
+     com.xiaopeng.clusterassist.AVM --ei side 2 --ef zoom 2.0 --ef panx 0.8 --ef pany 0`
+     （`side` 0=左右都设/1=左/2=右；`--ef zoom 0` 复位整格）。注意广播只改本次进程内存、
+     不写盘，重启后以 APP 存的值为准。
+   - 参数对象的 `getAvmDisplayMode()`/`flatten()` 在本车抛异常，读回只能直读内部
+     `LinkedHashMap mMap` 的 `display-mode` 键（`AvmMode.current()` 已按 getter→flatten→mMap 三级兜底）。
+
 ---
 
 ## 五、目录

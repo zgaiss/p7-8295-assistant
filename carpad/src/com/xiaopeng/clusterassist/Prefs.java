@@ -71,6 +71,21 @@ public class Prefs {
     // 数据桥
     public boolean bridge = true;      // 是否把电压/导航/日夜推到仪表
 
+    // 打灯影像（车机 → 仪表 :9002）
+    public boolean mirror = false;     // 默认关：会盖住半屏，必须显式打开
+    public int mirrorCamL = 0;         // 左灯用的相机 id（实车按需调整）
+    public int mirrorCamR = 1;         // 右灯用的相机 id
+    public int mirrorPort = 9002;      // 仪表端影像端口（与 config.json 的 video.port 一致）
+    // 打灯期间把 AVM 切到四路鱼眼四宫格：切过去后相机流本身就是 2×2 鱼眼拼图，
+    // 裁对应象限就能拿到该侧广角视野。默认开——这才是打灯影像该有的视角；
+    // 关掉就退回车机默认的 360 俯视 + 前视拼接画面。
+    public boolean mirrorAvm = true;
+    // 取景微调：四宫格里把该侧鱼眼放大、往车尾偏，舍弃车头。
+    // 左右鱼眼镜像，panx 方向相反，各存一套；zoom∈[1,3]、panx/pany∈[-1,1]。
+    public boolean quadCropEnable = true;          // 关=整格不微调
+    public float quadZoomL = 2.0f, quadPanXL = -0.8f, quadPanYL = 0f;
+    public float quadZoomR = 2.0f, quadPanXR = +0.8f, quadPanYR = 0f;
+
     public static Prefs load(Context c) {
         SharedPreferences sp = c.getSharedPreferences(SP, Context.MODE_PRIVATE);
         Prefs p = new Prefs();
@@ -120,6 +135,18 @@ public class Prefs {
         p.user = sp.getString("user", "root");
         p.pass = sp.getString("pass", "");
         p.bridge = sp.getBoolean("bridge", true);
+        p.mirror = sp.getBoolean("mirror", false);
+        p.mirrorCamL = sp.getInt("mirrorCamL", 0);
+        p.mirrorCamR = sp.getInt("mirrorCamR", 1);
+        p.mirrorPort = sp.getInt("mirrorPort", 9002);
+        p.mirrorAvm = sp.getBoolean("mirrorAvm", true);
+        p.quadCropEnable = sp.getBoolean("quadCropEnable", true);
+        p.quadZoomL = sp.getFloat("quadZoomL", 2.0f);
+        p.quadPanXL = sp.getFloat("quadPanXL", -0.8f);
+        p.quadPanYL = sp.getFloat("quadPanYL", 0f);
+        p.quadZoomR = sp.getFloat("quadZoomR", 2.0f);
+        p.quadPanXR = sp.getFloat("quadPanXR", +0.8f);
+        p.quadPanYR = sp.getFloat("quadPanYR", 0f);
         return p;
     }
 
@@ -167,6 +194,18 @@ public class Prefs {
         e.putString("user", user);
         e.putString("pass", pass);
         e.putBoolean("bridge", bridge);
+        e.putBoolean("mirror", mirror);
+        e.putInt("mirrorCamL", mirrorCamL);
+        e.putInt("mirrorCamR", mirrorCamR);
+        e.putInt("mirrorPort", mirrorPort);
+        e.putBoolean("mirrorAvm", mirrorAvm);
+        e.putBoolean("quadCropEnable", quadCropEnable);
+        e.putFloat("quadZoomL", quadZoomL);
+        e.putFloat("quadPanXL", quadPanXL);
+        e.putFloat("quadPanYL", quadPanYL);
+        e.putFloat("quadZoomR", quadZoomR);
+        e.putFloat("quadPanXR", quadPanXR);
+        e.putFloat("quadPanYR", quadPanYR);
         e.apply();
     }
 
@@ -182,6 +221,11 @@ public class Prefs {
         p.lyricPosX = lyricPosX; p.lyricPosY = lyricPosY; p.lyricScale = lyricScale;
         p.extTtl = extTtl;
         p.host = host; p.port = port; p.user = user; p.pass = pass; p.bridge = bridge;
+        p.mirror = mirror; p.mirrorCamL = mirrorCamL; p.mirrorCamR = mirrorCamR; p.mirrorPort = mirrorPort;
+        p.mirrorAvm = mirrorAvm;
+        p.quadCropEnable = quadCropEnable;
+        p.quadZoomL = quadZoomL; p.quadPanXL = quadPanXL; p.quadPanYL = quadPanYL;
+        p.quadZoomR = quadZoomR; p.quadPanXR = quadPanXR; p.quadPanYR = quadPanYR;
         return p;
     }
 
@@ -240,6 +284,10 @@ public class Prefs {
                 + "\"layout\":{\"dx\":" + dx + ",\"dy\":" + dy + ",\"scale\":" + fmt(scale) + "},"
                 + "\"lyricPos\":{\"dx\":" + lyricPosX + ",\"dy\":" + lyricPosY
                 + ",\"scale\":" + String.format(java.util.Locale.ROOT, "%.2f", lyricScale) + "},"
+                // 打灯影像必须在这里下发：仪表端只在进程启动时按 video.enable 决定是否监听
+                // 9002，而这份 JSON 是整份覆盖写——漏了这个字段等于每次推送都把影像关掉，
+                // 表现为仪表重启/热升级后"打灯没画面"（端口根本没监听）。
+                + "\"video\":{\"enable\":" + mirror + ",\"port\":" + mirrorPort + "},"
                 + "\"ext\":{\"ttlMs\":" + extTtl + "}"
                 + "}";
     }

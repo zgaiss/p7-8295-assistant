@@ -677,14 +677,32 @@ func daemonMain() {
 	)
 	// 打灯影像的运行态。全部只在渲染线程（本循环）读写，网络线程碰不到。
 	var (
-		mirRect rect  // 当前影像独占矩形（空 = 未激活）
-		mirSide uint8 // 当前显示侧（mirSideNone/Left/Right）
+		mirRect    rect      // 当前影像独占矩形（空 = 未激活）
+		mirSide    uint8     // 当前显示侧（mirSideNone/Left/Right）
+		mirRetryAt time.Time // 启动监听失败后的重试时刻（限频，避免刷日志）
+		mirStatAt  int64     // 上次打印耗时统计的时刻（UnixMilli）
 	)
 	tick := time.NewTicker(frameMS * time.Millisecond)
 	defer tick.Stop()
 
+	// 主循环节拍统计（只用于日志，不参与任何渲染决策）
+	var loopN int
+	var loopMax time.Duration
+	var lastTickAt time.Time
+	// 分段耗时：pre = 文件检查/配置/信号读取，mir = 影像上屏，draw = 界面绘制与 blit。
+	// 只有拆开才知道 270ms 的一轮到底慢在哪一段。
+	var segDraw, segClear, segPaint, segBlit time.Duration
+	var blitW, blitH int
+
 	for range tick.C {
 		now := time.Now()
+		if !lastTickAt.IsZero() {
+			if gap := now.Sub(lastTickAt); gap > loopMax {
+				loopMax = gap
+			}
+		}
+		lastTickAt = now
+		loopN++
 
 		// stop 文件
 		if _, err := os.Stat(stopPath); err == nil {
@@ -818,6 +836,21 @@ func daemonMain() {
 			}
 		}
 		cfg2 := b.config()
+
+		// 打灯影像：监听也跟随配置。
+		//
+		// 原来只在进程启动时看一次 video.enable，而车机推来的 config.json 是
+		// 整份覆盖写：用户中途打开「打灯影像」就得重启仪表才生效（更糟的是
+		// 车机端曾经漏下发这个字段，热升级后 9002 压根没监听）。这里补成
+		// 「配置开了就起监听」，创建失败 10 秒后重试，避免每 50ms 刷一条日志。
+		if mir == nil && cfg2.Enabled && cfg2.Video.Enable && now.After(mirRetryAt) {
+			if m := newMirServer(cfg2.Video.Port, func(f string, a ...any) { lg.Printf(f, a...) }); m != nil {
+				m.start()
+				mir = m
+			} else {
+				mirRetryAt = now.Add(10 * time.Second)
+			}
+		}
 
 		// 视频模式：充电页整屏交给仪表本地播放器（p7videoplay 读 charge.pack 播动画，
 		// 本进程只负责每秒刷一次文字层 JPEG）。见 videoplay.go / chgoverlay.go。
@@ -1037,6 +1070,7 @@ func daemonMain() {
 		//      让本轮随后把它重画回来 —— 不并进 prev 就会留下上一侧的画面残影；
 		//   3. 同一侧有新帧就整行搬进 fb1。
 		// 影像矩形全程由 boxBlit.minus 让路，主循环永远不会写它。
+		tSeg0 := time.Now()
 		if mir != nil {
 			chgNow := (cfg2.Features.ChargePage && s.chg.on) || cfg2.Features.ChargeDebug
 			f := mir.take()
@@ -1053,13 +1087,18 @@ func daemonMain() {
 				mirSide = mirSideNone
 			}
 			want := mirZoneRect(mirSide)
+			justGranted := false
 			if !sameRect(want, mirRect) {
 				if !mirRect.empty() {
+					// 必须先 revoke：它会持锁等解码线程写完手上这一帧，
+					// 之后再 clearBox，才不会出现"刚清干净又被写回半帧"的残影。
+					mir.revoke()
 					fb.clearBox(mirRect)
 					prev = prev.union(mirRect)
 					cv.clearRect(mirRect)
 				}
 				if !want.empty() {
+					justGranted = true
 					lg.Printf("影像: 上屏 %s（x=%.0f~%.0f y=%.0f~%.0f）",
 						mirSideName(mirSide), want.x0, want.x1, want.y0, want.y1)
 				} else {
@@ -1067,19 +1106,58 @@ func daemonMain() {
 				}
 				mirRect = want
 			}
+			// 授权：像素由解码线程直接写进 fb1 影像矩形，主循环只负责这块区域的归属。
+			// 每轮刷新一次，reinit 换过 fb 句柄也能自动跟上新指针。
+			if mirRect.empty() {
+				mir.revoke()
+			} else {
+				mir.grant(fb, mirRect, mirSide)
+			}
 			if f != nil {
-				if f.pix != nil && !mirRect.empty() {
+				// 正常路径下像素已经由解码线程 flushTo 写进 fb1，这里只归还缓冲；
+				// 只有"本轮刚授权"时，这一帧是在授权之前解出来的，直写不会生效，
+				// 补写一次免得黑等一帧。
+				if f.pix != nil && justGranted && !mirRect.empty() && f.side == mirSide {
+					t0 := time.Now()
 					fb.write565Rect(mirRect, f.pix, mirZoneW, mirZoneH)
+					mir.markBlit(time.Since(t0))
 				}
 				mir.release(f)
 			}
 		}
+		tSeg1 := time.Now()
+
+		// 每 3 秒打一次实测节拍。影像上屏只发生在本循环里，所以主循环的
+		// 循环频率就是影像帧率的硬上限——真机实测发现解码 90ms 时上屏却只有
+		// 4fps，说明限速的根本不是解码，而是这个循环本身。必须把它量化出来，
+		// 否则会一直去优化错误的环节。
+		if now.UnixMilli()-mirStatAt >= 3000 {
+			mirStatAt = now.UnixMilli()
+			fps := float64(loopN) / 3
+			pre := tSeg0.Sub(now).Milliseconds()
+			mm := tSeg1.Sub(tSeg0).Milliseconds()
+			if mir != nil {
+				dm, bm, dn, bn := mir.stats()
+				lg.Printf("循环 %.1ffps 最长 %dms | pre %dms mir %dms draw %dms (清 %d 画 %d 上屏 %d [%d×%d]) | 解压 %.1fms×%d 上屏 %.1fms×%d 丢 %d",
+					fps, loopMax.Milliseconds(), pre, mm, segDraw.Milliseconds(),
+					segClear.Milliseconds(), segPaint.Milliseconds(), segBlit.Milliseconds(), blitW, blitH,
+					dm, dn, bm, bn, mir.drops.Load())
+			} else {
+				lg.Printf("循环 %.1ffps 最长 %dms | pre %dms mir %dms draw %dms (清 %d 画 %d 上屏 %d [%d×%d])",
+					fps, loopMax.Milliseconds(), pre, mm, segDraw.Milliseconds(),
+					segClear.Milliseconds(), segPaint.Milliseconds(), segBlit.Milliseconds(), blitW, blitH)
+			}
+			loopN = 0
+			loopMax = 0
+		}
 
 		// 清上一帧区域
+		tD0 := time.Now()
 		cv.clearRect(prev)
 		cv.dirty = rect{}
 		// 歌词卡片要按原厂底图取色，这里把 fb0 句柄挂上（fb 可能被重开过，每帧赋值）
 		cv.bg = fb.bg
+		tD1 := time.Now()
 
 		drawn := false
 		chargeFull := false
@@ -1090,6 +1168,7 @@ func daemonMain() {
 			drawn = !cv.dirty.empty()
 		}
 		nd := cv.dirty.clamp()
+		tD2 := time.Now()
 
 		needBlit := !first && (!prev.empty() || !nd.empty())
 		if drawn || needBlit {
@@ -1097,6 +1176,8 @@ func daemonMain() {
 			if chargeFull {
 				fb.blitOpaqueFull(cv)
 			} else if !boxBlit.empty() {
+				blitW = int(boxBlit.x1 - boxBlit.x0)
+				blitH = int(boxBlit.y1 - boxBlit.y0)
 				// 把影像独占区从脏矩形里减掉再上屏。
 				//
 				// 这是"不花屏"的最后一道保险：脏矩形可能横跨影像区（左边胎压、
@@ -1108,11 +1189,18 @@ func daemonMain() {
 				}
 			}
 		}
+		tD3 := time.Now()
 		first = false
 		prev = nd
 		if drawn {
 			frames++
 		}
+		// 分拆 draw 段：清区 / 绘制 / 上屏。空闲实测 draw 就要 210~300ms，
+		// 必须知道是哪一截，否则没法判断优化空间在哪里。
+		segClear = tD1.Sub(tD0)
+		segPaint = tD2.Sub(tD1)
+		segBlit = tD3.Sub(tD2)
+		segDraw = time.Since(tSeg1)
 	}
 }
 

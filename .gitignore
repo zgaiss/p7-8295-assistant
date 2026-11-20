@@ -5,6 +5,9 @@ dist/
 # carpad/build.sh 的中间产物（aapt2 / javac / d8 输出）
 carpad/build/
 
+# 反汇编 / 解包 dump（可重新 pull，体积大且含厂商二进制，不入库）
+analysis/
+
 # 在 instrument/ 里直接 go build 会落在当前目录，别让它进库
 /instrument/p7assist
 
