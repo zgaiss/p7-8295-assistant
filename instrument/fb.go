@@ -402,6 +402,46 @@ func (d *fbDev) blit(cv *canvas, b rect) {
 	}
 }
 
+// write565Rect 把一整帧已打包好的 RGB565 直接搬进 fb1 的目标矩形。
+//
+// 与 blit 的区别：这里**不解包、不混合、不查背景**。像素进来就是 fb1 的
+// 最终内存布局（小端 16bpp），一行 960 像素 = 1920 字节，用 copy 整行搬。
+//
+// 为什么必须走这条路：blit 是逐像素带分支写（还要按 alpha 和 fb0 混合），
+// 全屏实测 95ms；而整行 memmove 两个数量级更快。影像 960×540 = 1.0MB，
+// 按 175MB/s 约 6ms，15fps 才占得住这颗 CPU。
+//
+// 返回写入的像素行数，0 表示没写（尺寸不符或矩形越界）。
+func (d *fbDev) write565Rect(b rect, pix []byte, srcW, srcH int) int {
+	b = b.clamp()
+	if b.empty() || srcW <= 0 || srcH <= 0 {
+		return 0
+	}
+	w := int(b.x1) - int(b.x0)
+	h := int(b.y1) - int(b.y0)
+	if w != srcW || h > srcH {
+		return 0 // 宽度对不上就没法整行搬；宁可整帧不写，也不要写半块留残影
+	}
+	rowBytes := srcW * 2
+	for y := 0; y < h; y++ {
+		dy := int(b.y0) + y
+		if dy < 0 || dy >= d.h {
+			continue
+		}
+		so := y * srcW * 2
+		if so+rowBytes > len(pix) {
+			break
+		}
+		row := d.mem[dy*d.lineLen:]
+		do := int(b.x0) * 2
+		if do+rowBytes > len(row) {
+			break
+		}
+		copy(row[do:do+rowBytes], pix[so:so+rowBytes])
+	}
+	return h
+}
+
 func readSys(name string) string {
 	b, _ := os.ReadFile(fbSys + "/" + name)
 	return strings.TrimSpace(string(b))

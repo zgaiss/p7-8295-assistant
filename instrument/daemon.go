@@ -564,6 +564,18 @@ func daemonMain() {
 	screenOnInit := !layerBlanked()
 	lg.Printf("fb ok: %dx%d stride=%d", fb.w, fb.h, fb.lineLen)
 
+	// 4) 打灯盲区影像：只在配置开启时监听。
+	//
+	// 端口占用、权限不足都只记日志，不阻断主程序 —— 未接车机时这里应当完全
+	// 静默，任何情况下都不能因为影像服务起不来就影响仪表本身的绘制。
+	var mir *mirServer
+	if c0 := b.config(); c0.Video.Enable {
+		mir = newMirServer(c0.Video.Port, func(f string, a ...any) { lg.Printf(f, a...) })
+		if mir != nil {
+			mir.start()
+		}
+	}
+
 	// 3) 信号处理：退出一定清像素 + 关层
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -575,6 +587,9 @@ func daemonMain() {
 		case <-done:
 		}
 		stopVideo(lg) // 播放器还在跑就先收掉，避免它继续写 fb1
+		if mir != nil {
+			mir.close() // 先断流，保证 close 之后不会再有帧进来
+		}
 		restore(fb)
 		lg.Printf("=== p7assist exit ===")
 		os.Exit(0)
@@ -659,6 +674,11 @@ func daemonMain() {
 	var (
 		lastChargeSig uint64
 		chargeActive  bool
+	)
+	// 打灯影像的运行态。全部只在渲染线程（本循环）读写，网络线程碰不到。
+	var (
+		mirRect rect  // 当前影像独占矩形（空 = 未激活）
+		mirSide uint8 // 当前显示侧（mirSideNone/Left/Right）
 	)
 	tick := time.NewTicker(frameMS * time.Millisecond)
 	defer tick.Stop()
@@ -1008,6 +1028,53 @@ func daemonMain() {
 			chargeActive = false
 		}
 
+		// ---- 打灯盲区影像 ----
+		//
+		// 这里是**唯一**写影像矩形的地方，而且刻意放在 canvas 上屏之前。
+		// 时序很关键：
+		//   1. 取帧、决定这一轮该显示哪一侧；
+		//   2. 矩形变化（换侧 / 撤区）时先把旧矩形清成透明，并把旧矩形并进 prev，
+		//      让本轮随后把它重画回来 —— 不并进 prev 就会留下上一侧的画面残影；
+		//   3. 同一侧有新帧就整行搬进 fb1。
+		// 影像矩形全程由 boxBlit.minus 让路，主循环永远不会写它。
+		if mir != nil {
+			chgNow := (cfg2.Features.ChargePage && s.chg.on) || cfg2.Features.ChargeDebug
+			f := mir.take()
+			if f != nil {
+				if f.side == mirSideNone {
+					mirSide = mirSideNone
+				} else if f.pix != nil {
+					mirSide = f.side
+				}
+			}
+			// 断流 / 倒挡整块隐藏 / 充电页接管 / 屏幕已关，一律撤区。
+			// 充电页是整屏不透明画面，优先级高于影像。
+			if chgNow || hidden || !screenOn || hold || mir.stale(now.UnixMilli()) {
+				mirSide = mirSideNone
+			}
+			want := mirZoneRect(mirSide)
+			if !sameRect(want, mirRect) {
+				if !mirRect.empty() {
+					fb.clearBox(mirRect)
+					prev = prev.union(mirRect)
+					cv.clearRect(mirRect)
+				}
+				if !want.empty() {
+					lg.Printf("影像: 上屏 %s（x=%.0f~%.0f y=%.0f~%.0f）",
+						mirSideName(mirSide), want.x0, want.x1, want.y0, want.y1)
+				} else {
+					lg.Printf("影像: 撤区")
+				}
+				mirRect = want
+			}
+			if f != nil {
+				if f.pix != nil && !mirRect.empty() {
+					fb.write565Rect(mirRect, f.pix, mirZoneW, mirZoneH)
+				}
+				mir.release(f)
+			}
+		}
+
 		// 清上一帧区域
 		cv.clearRect(prev)
 		cv.dirty = rect{}
@@ -1030,7 +1097,15 @@ func daemonMain() {
 			if chargeFull {
 				fb.blitOpaqueFull(cv)
 			} else if !boxBlit.empty() {
-				fb.blit(cv, boxBlit)
+				// 把影像独占区从脏矩形里减掉再上屏。
+				//
+				// 这是"不花屏"的最后一道保险：脏矩形可能横跨影像区（左边胎压、
+				// 右边歌词同时变化时 prev.union(nd) 就是整屏），直接 blit 会把
+				// canvas 里那块透明像素盖到影像上，表现为整块黑闪。
+				// mirRect 为空时 minus 原样返回整块，与改动前完全等价。
+				for _, r := range boxBlit.minus(mirRect) {
+					fb.blit(cv, r)
+				}
 			}
 		}
 		first = false
