@@ -25,17 +25,15 @@ sh build-all.sh
 #       dist/仪表端/{p7assist,p7assistctl,p7boot.sh,p7watch.sh,install-autostart.sh,uninstall-autostart.sh}
 ```
 
-脚本按主机自动选择打包方式，并在动手前先做前置检查（缺 JDK / Android SDK 会直接报错，**不会**先把 `carpad/assets/` 覆盖掉再失败）：
+脚本按主机自动选择打包方式，并在动手前检查 JDK / Android SDK 等前置条件：
 
 | 主机 `uname -s` | 打包脚本 | 签名 |
 |---|---|---|
 | `Darwin` | `carpad/build-mac.sh` | `tools/testkey` |
-| `MINGW*` / `MSYS*` / `CYGWIN*` | `carpad/build.sh` | `carpad/p7.keystore`（缺则自动生成） |
+| `MINGW*` / `MSYS*` / `CYGWIN*` | `carpad/build.sh` | `tools/testkey` |
 | 其他（含 Linux） | 不自动分派，会给出手动两步的命令 | — |
 
-流程：`go test ./...`（在主机平台跑纯逻辑用例）→ 交叉编译 `linux/arm` → 拷进 `carpad/assets/` → 打包签名。
-
-> 构建会覆盖被跟踪的 `carpad/assets/p7assist`（以及几个自启脚本）。这是有意的——APK 里带的就是刚编出来的二进制。提交前如不想带上新二进制，`git checkout -- carpad/assets/p7assist` 还原即可。
+流程：主机运行 `go test ./...` 后，由打包脚本交叉编译 `linux/arm` 到构建暂存目录，将新二进制和自启脚本打进 APK，核对版本与哈希，通过后生成两端产物。不改动 Git 跟踪的 `carpad/assets/`。
 
 ### 2. 只打车机 APK
 
@@ -64,23 +62,33 @@ sh build-mac.sh
 # 产物：../dist/P7仪表助手-原生版.apk
 ```
 
-流程与 `build.sh` 相同，差别只有工具路径无 `.exe` 后缀、JDK 走 `Contents/Home`，以及**签名统一用 `tools/testkey`（AOSP testkey）而不是 `carpad/p7.keystore`**。SDK 默认取 `~/Library/Android/sdk`，可用 `ANDROID_SDK_ROOT` 覆盖。
+流程与 `build.sh` 相同，工具路径无 `.exe` 后缀、JDK 走 `Contents/Home`。两者签名都使用 `tools/testkey`（AOSP testkey）；Windows 即使生成了 `carpad/p7.keystore`，签名也不使用它。SDK 默认取 `~/Library/Android/sdk`，可用 `ANDROID_SDK_ROOT` 覆盖。
 
 两条脚本产出的文件名都是 `P7仪表助手-原生版.apk`；对外发布时重命名为 `P7仪表助手_v<版本>_充电视频版.apk`（与本文标题、首段一致）。`dist/` 目录由脚本自动创建。
 
-版本号写在 `build.sh` 的 `--version-code/--version-name`，**必须与 `instrument/config.go` 的 `appVersion`、`build-mac.sh` 的同名字段完全一致**（原因见第四节第 6 条）。
+版本号唯一来源是 `carpad/AndroidManifest.xml` 的 `android:versionName/versionCode`。两个APK脚本均先用 `tools/build_version.py` 快照manifest并强制重新编译仪表（需 Go 1.23.4，可用 GO 指定编译器），通过 `-X main.appVersion` 注入同一versionName。AAPT2只读该快照，不再保留fallback版本参数。打包覆盖旧预编译p7assist及旧脚本，签名前后都核对APK版本和内嵌仪表hash，验证通过才替换dist成品；任一步失败停止，不回退打包旧资产。仪表固定使用已有随包 ARM 二进制的 Go 1.23.4 工具链，并禁用自动工具链切换；升级 Go 前须另行验证目标内核兼容性。这不是实车兼容验证。此变化不会自动修改版本号。
 
 ### 3. 只编仪表端二进制
 
+从仓库根目录执行：
+
 ```bash
-cd instrument
-CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
-  go build -trimpath -ldflags "-s -w" -o ../dist/p7assist .
+python3 tools/build_version.py prepare --out /tmp/p7-instrument-build
 ```
 
-产物 `p7assist` 需要放进 `carpad/assets/p7assist` 再打 APK——APK 启动后会自动比对仪表版本并推送，否则仪表会一直跑旧二进制。
+仪表产物为 `/tmp/p7-instrument-build/instrument/p7assist`，版本来自同目录manifest快照。
+不必也不应手动复制到tracked `carpad/assets`：两个APK打包入口都会重新构建并覆盖打包中的旧仪表资产。
 
-`instrument/` 里的纯逻辑（状态推导、排版、预览渲染）与 Linux-only 代码是分开的：`daemon.go`/`fb.go`/`shot.go`/`chargepage_linux.go` 带 `//go:build linux`，其余文件在 PC 上也能编译，所以 `go test ./...` 与 `p7assist render` 可以直接在 macOS / Windows 上跑。
+`instrument/` 的纯逻辑测试可在主机执行；直接原始 `go build` 只适合开发，
+发布构建必须经过统一helper注入版本。
+
+### 版本构建回归
+从仓库根目录执行 `python3 -m unittest discover -s tools/tests -v`。
+测试使用fake Go/AAPT2验证构建协议与旧asset拒绝，不等于真实Android/ARM构建。
+直接执行原始 `go build` 会报告 `dev-unversioned`，不是发布版本；
+不要手动复制这种二进制或旧tracked assets进行发版。版本匹配仍由现有
+`checkClusterVersion` 的versionName相等判断决定：与APK版本不等时驻车触发上传，
+成功采用同版本新构建后停止重复推送。这里没有改动FTP升级安全机制。
 
 ---
 
@@ -330,4 +338,3 @@ sh tools/probe_card.sh
 ```
 卡片矩形 (1263,459)-(1821,599)  10 点平均 #0C0E11 (L=13.8)
 ```
-

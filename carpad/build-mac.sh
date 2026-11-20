@@ -18,7 +18,7 @@ SDK=${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}
 JAVA_HOME=${JAVA_HOME:-$(echo "$T"/jdk/*/Contents/Home | awk '{print $1}')}
 BT=${BT:-$(echo "$SDK"/build-tools/*/ | awk '{print $1}')}
 AJAR=${AJAR:-$(echo "$SDK"/platforms/*/android.jar | awk '{print $NF}' | tr ' ' '\n' | sort -V | tail -n 1)}
-PATH="$JAVA_HOME/bin:$PATH"
+PATH="$T/go/bin:$JAVA_HOME/bin:$PATH"
 export PATH
 
 echo "== JDK         $JAVA_HOME"
@@ -28,6 +28,7 @@ echo "== android.jar $AJAR"
 cd "$HERE"
 rm -rf build
 mkdir -p build/compiled build/gen build/classes build/dex build/apk
+python3 "$ROOT/tools/build_version.py" prepare --out build
 
 # 1) 资源
 "$BT/aapt2" compile --dir res -o build/compiled/res.zip
@@ -36,9 +37,8 @@ mkdir -p build/compiled build/gen build/classes build/dex build/apk
 "$BT/aapt2" link \
     -o build/apk/base.apk \
     -I "$AJAR" \
-    --manifest AndroidManifest.xml \
+    --manifest build/AndroidManifest.xml \
     --min-sdk-version 28 --target-sdk-version 28 \
-    --version-code 102 --version-name 2.12.4 \
     --java build/gen \
     build/compiled/res.zip
 
@@ -61,6 +61,9 @@ find build/classes -name '*.class' > build/classes.txt
 cp build/apk/base.apk build/apk/unsigned.apk
 python3 "$HERE/../tools/addzip.py" build/apk/unsigned.apk build/dex/classes.dex
 python3 "$HERE/../tools/addzip.py" build/apk/unsigned.apk --prefix assets/ --dir assets
+# Override tracked prebuilt with the mandatory freshly versioned binary.
+python3 "$ROOT/tools/addzip.py" build/apk/unsigned.apk --prefix assets/ --dir build/instrument
+python3 "$ROOT/tools/build_version.py" verify --out build --apk build/apk/unsigned.apk --aapt "$BT/aapt2"
 
 # 6) 对齐 + 签名（AOSP testkey，车机信任该密钥）
 KEY=$HERE/../tools/testkey
@@ -69,7 +72,11 @@ mkdir -p ../dist
 "$BT/apksigner" sign \
     --key "$KEY/testkey.pk8" \
     --cert "$KEY/testkey.x509.pem" \
-    --out "../dist/P7仪表助手-原生版.apk" build/apk/aligned.apk
+    --out build/apk/signed.apk build/apk/aligned.apk
+
+python3 "$ROOT/tools/build_version.py" verify --out build --apk build/apk/signed.apk --aapt "$BT/aapt2"
+cp build/apk/signed.apk "../dist/P7仪表助手-原生版.apk.tmp"
+mv -f "../dist/P7仪表助手-原生版.apk.tmp" "../dist/P7仪表助手-原生版.apk"
 
 echo "== OK  ->  $HERE/../dist/P7仪表助手-原生版.apk"
 ls -la "../dist/P7仪表助手-原生版.apk"

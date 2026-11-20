@@ -16,7 +16,7 @@ T=$ROOT/tools
 JAVA_HOME=${JAVA_HOME:-$(echo "$T"/jdk/* | awk '{print $1}')}
 BT=$(echo "$T"/bt/*/ | awk '{print $1}')
 AJAR=$(echo "$T"/plat/*/android.jar | awk '{print $1}')
-PATH="$JAVA_HOME/bin:$PATH"
+PATH="$T/go/bin:$JAVA_HOME/bin:$PATH"
 export PATH
 
 echo "== JDK         $JAVA_HOME"
@@ -26,6 +26,7 @@ echo "== android.jar $AJAR"
 cd "$HERE"
 rm -rf build
 mkdir -p build/compiled build/gen build/classes build/dex build/apk
+python "$ROOT/tools/build_version.py" prepare --out build
 
 # 1) 资源
 "$BT/aapt2.exe" compile --dir res -o build/compiled/res.zip
@@ -34,9 +35,8 @@ mkdir -p build/compiled build/gen build/classes build/dex build/apk
 "$BT/aapt2.exe" link \
     -o build/apk/base.apk \
     -I "$AJAR" \
-    --manifest AndroidManifest.xml \
+    --manifest build/AndroidManifest.xml \
     --min-sdk-version 28 --target-sdk-version 28 \
-    --version-code 103 --version-name 2.12.5 \
     --java build/gen \
     build/compiled/res.zip
 
@@ -59,6 +59,9 @@ find build/classes -name '*.class' | sed 's|^|./|' > build/classes.txt
 cp build/apk/base.apk build/apk/unsigned.apk
 python "$HERE/../tools/addzip.py" build/apk/unsigned.apk build/dex/classes.dex
 python "$HERE/../tools/addzip.py" build/apk/unsigned.apk --prefix assets/ --dir assets
+# Override tracked prebuilt with the mandatory freshly versioned binary.
+python "$ROOT/tools/addzip.py" build/apk/unsigned.apk --prefix assets/ --dir build/instrument
+python "$ROOT/tools/build_version.py" verify --out build --apk build/apk/unsigned.apk --aapt "$BT/aapt2.exe"
 
 # 6) 对齐 + 签名
 KS=$HERE/p7.keystore
@@ -75,7 +78,11 @@ mkdir -p ../dist
 "$BT/apksigner.bat" sign \
     --key "$ROOT/tools/testkey/testkey.pk8" \
     --cert "$ROOT/tools/testkey/testkey.x509.pem" \
-    --out "../dist/P7仪表助手-原生版.apk" build/apk/aligned.apk
+    --out build/apk/signed.apk build/apk/aligned.apk
+
+python "$ROOT/tools/build_version.py" verify --out build --apk build/apk/signed.apk --aapt "$BT/aapt2.exe"
+cp build/apk/signed.apk "../dist/P7仪表助手-原生版.apk.tmp"
+mv -f "../dist/P7仪表助手-原生版.apk.tmp" "../dist/P7仪表助手-原生版.apk"
 
 echo "== OK  ->  $HERE/../dist/P7仪表助手-原生版.apk"
 ls -la "../dist/P7仪表助手-原生版.apk"
