@@ -24,6 +24,11 @@ public class CarBridge {
     private static final int PROP_12V_CURR = 0x21601216; // VCU_EBSBATT_CURR
     private static final int PROP_BSD_LEFT = 0x21402624; // SCU_BSD_LEFT_WARNING
     private static final int PROP_BSD_RIGHT = 0x21402623; // SCU_BSD_RIGHT_WARNING
+    // 转向灯：与车机 dumpsys car_service 里的
+    // Property=BCM_LTURNLAMP_ST(557849623, 0x21401c17) 一一对应。
+    private static final int PROP_TURN_LEFT = 0x21401c17;
+    private static final int PROP_TURN_RIGHT = 0x21401c18;
+    private static final int PROP_GEAR = 0x21401205;      // VCU_CURRENT_GEARLEV
 
     private static Object propApi;
     private static ClassLoader carLoader;
@@ -85,6 +90,16 @@ public class CarBridge {
 
     /** 读一个属性，返回原始 value 对象；失败返回 null */
     private static Object raw(int id) {
+        return raw(id, false);
+    }
+
+    /**
+     * 读一个属性；quiet=true 时失败不写日志。
+     *
+     * <p>转向灯/挡位是 200ms 轮询，属性一旦在这个固件上不存在，
+     * 每次失败都打一行日志就是每秒 5 行的噪声，把真正的问题埋掉。</p>
+     */
+    private static Object raw(int id, boolean quiet) {
         Object api = api();
         if (api == null) return null;
         try {
@@ -95,7 +110,7 @@ public class CarBridge {
                     .getMethod("getValue").invoke(v);
         } catch (Throwable t) {
             lastErr = shortErr(t.getCause() != null ? t.getCause() : t);
-            Log.w(TAG, String.format("读 0x%08x 失败: %s", id, lastErr));
+            if (!quiet) Log.w(TAG, String.format("读 0x%08x 失败: %s", id, lastErr));
             return null;
         }
     }
@@ -140,6 +155,37 @@ public class CarBridge {
         if (v instanceof Number) return ((Number) v).intValue();
         return null;
     }
+
+    // ---- 打灯影像用到的三个信号（200ms 轮询，读不到返回 null 表示"未知"）----
+
+    /** 左转向灯；null=读不到（调用方应保持上一状态，不要当成"灭"） */
+    public static Boolean readTurnLeft() {
+        Object v = raw(PROP_TURN_LEFT, true);
+        if (v instanceof Number) return ((Number) v).intValue() != 0;
+        return null;
+    }
+
+    /** 右转向灯 */
+    public static Boolean readTurnRight() {
+        Object v = raw(PROP_TURN_RIGHT, true);
+        if (v instanceof Number) return ((Number) v).intValue() != 0;
+        return null;
+    }
+
+    /**
+     * 挡位（VCU_CURRENT_GEARLEV 原始值）。
+     *
+     * <p>P7 车机上 P=4，按 P/R/N/D 递减推断 R=3（另一套打灯影像实现的实车结论）。
+     * 若实车日志显示 R 是别的值，只改 {@link #GEAR_REVERSE} 即可。</p>
+     */
+    public static Integer readGear() {
+        Object v = raw(PROP_GEAR, true);
+        if (v instanceof Number) return ((Number) v).intValue();
+        return null;
+    }
+
+    /** 倒挡档位值 */
+    public static final int GEAR_REVERSE = 3;
 
     private static String shortErr(Throwable t) {
         String s = t.getClass().getSimpleName();

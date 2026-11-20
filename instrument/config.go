@@ -98,6 +98,16 @@ type ExtCfg struct {
 	TTLMs int `json:"ttlMs"` // ext.json 超过这个时间视为过期
 }
 
+// VideoCfg 打灯盲区影像：车机把该侧后方画面经 zstd 推到仪表，仪表半屏显示。
+//
+// 默认**关闭**，并且字段缺失一律按关闭处理。这里故意不用 popupHide 那种
+// 「缺失即视为开」的写法：popupHide 缺失最多是少藏两张卡，影像缺失按开处理
+// 会直接盖住半屏界面，属于把旧版车机的用户升级后立刻踩坑。
+type VideoCfg struct {
+	Enable bool `json:"enable"`
+	Port   int  `json:"port"` // 监听端口，默认 9002；9000 留给车机端 H.264 实验
+}
+
 type Config struct {
 	Version   int         `json:"version"`
 	Enabled   bool        `json:"enabled"` // 全局开关
@@ -108,6 +118,7 @@ type Config struct {
 	Layout    LayoutCfg   `json:"layout"`
 	LyricPos  LyricPosCfg `json:"lyricPos"` // 左上角歌词块拖动位置
 	Ext       ExtCfg      `json:"ext"`
+	Video     VideoCfg    `json:"video"`     // 打灯盲区影像
 	ShowClock bool        `json:"showClock"` // 预留：左下角时钟
 }
 
@@ -202,6 +213,10 @@ func (c *Config) normalize() {
 	}
 	if c.Ext.TTLMs <= 0 {
 		c.Ext.TTLMs = 30000
+	}
+	// 影像端口只在开启时才需要有效值；关掉时保持 0，避免误开监听
+	if c.Video.Port <= 0 || c.Video.Port > 65535 {
+		c.Video.Port = 9002
 	}
 	// 旧配置没有 bsdSrc 字段时默认走车机数据（仪表 DBus 的 eind_lbsd 只是指示灯，实车不可靠）
 	if c.BSDSrc != "bus" {

@@ -1,6 +1,6 @@
-# P7 仪表助手 · 源码（v2.12.4 · 充电视频版）
+# P7 仪表助手 · 源码（v2.14.0 · 打灯影像版）
 
-小鹏 P7 车机 App + 仪表端守护进程。本包是 v2.12.4 的完整源码，对应 APK：`P7仪表助手_v2.12.4_充电视频版.apk`。
+小鹏 P7 车机 App + 仪表端守护进程。本包是 v2.14.0 的完整源码，对应 APK：`P7仪表助手_v2.14.0.apk`。
 
 ---
 
@@ -9,7 +9,7 @@
 | 目录 | 语言 | 跑在哪 | 作用 |
 |---|---|---|---|
 | `carpad/` | Java（无 Gradle，aapt2 + javac + d8 直接打） | 车机 Android | 读车况/媒体信息，通过 FTP 把配置和歌词推给仪表；充电动画资源的部署与调试入口 |
-| `instrument/` | Go（交叉编译到 linux/arm） | 仪表 i.MX6（Linux 3.0.35） | 直接写 fb1 前景层，画胎压/歌词/盲区/导航/红绿灯/充电页文字 |
+| `instrument/` | Go（交叉编译到 linux/arm） | 仪表 i.MX6（Linux 3.0.35） | 直接写 fb1 前景层，画胎压/歌词/盲区/导航/红绿灯/充电页文字；接收车机推来的打灯影像并在半屏显示 |
 
 两边通过 **仪表侧 FTP（172.20.1.40:2221，root/空密码，chroot 在 /data）** 和 **30510 管理通道**交换数据。
 
@@ -196,6 +196,71 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
 
    改完实测：卡片与原厂底图 8px 窗口平均偏差从 ±4 级降到 **≤0.8 级**。
 
+9. **打灯盲区影像是"单写者"模型，这是不花屏的全部原因**。
+   影像区固定 960×540：打左灯占左半屏 `x 0–960`、打右灯占右半屏 `x 960–1920`，纵向 `y 60–600`
+   （顶部让出档位条、底部让出电量/续航/时间，960:540 严格 16:9 不拉伸）。
+
+   车机把画面**预先缩放到 960×540 并转成 RGB565**，zstd 压缩后经 TCP（默认 `:9002`）推过来；
+   仪表只做 `解压 → 整行 memmove 进 fb1`，零缩放、零像素格式转换。
+   反过来（JPEG/H.264）都不可行：仪表 JPEG 软解实测约 20M 像素/s，960×540 一帧 26ms，
+   只够 6~10fps 还要吃满一个核；链路又只有 92Mbps，裸 565 跑 15fps 需要 15MB/s。
+
+   并发模型是三条硬规则，缺一条就会花屏：
+   - **网络线程从不碰 fb1**，只负责收帧、解压、放进深度为 1 的槽（保新丢旧）；
+   - **主循环是 fb1 的唯一写者**，每轮从槽里取最新帧写入影像矩形；
+   - 上屏时用 `rect.minus` 把影像矩形从脏矩形里**减掉**，拆成最多 4 块分别 blit。
+     脏矩形可能横跨影像区（左右两侧同时变化时 `prev.union(nd)` 就是整屏），
+     不减就会用 canvas 里的透明像素把影像盖成黑块。
+
+   换侧/撤区时，主循环先把旧矩形 `clearBox` 并把旧矩形并进 `prev` 强制重绘，
+   否则会留下上一侧的画面残影。撤区触发条件：收到 `side=0`、800ms 无新帧、
+   TCP 断开、倒挡整块隐藏、充电页接管、屏幕关闭。
+
+   **ARMv7 的 64 位原子必须对齐**：`atomic.Load64` 在 32 位 ARM 上要求地址 8 字节对齐，
+   结构体里的裸 `int64` 字段不保证（Go 文档明确由调用方负责）。
+   第一版就用裸 `int64` 存收帧时间戳，实机启动即 `unaligned 64-bit atomic operation` panic。
+   现在一律用 `atomic.Int64` / `atomic.Int32`（它们的 `align64` 标记让编译器补齐对齐）。
+
+   配置在 `config.json` 的 `video` 段：`{"enable": true, "port": 9002}`。
+   **默认关闭**，且字段缺失按关闭处理——影像会盖住半屏，不能像 `popupHide` 那样"缺失即开"。
+
+   车机端取哪一路视野（`carpad/.../AvmMode.java` + `MirrorSource.java`）：
+   - 车机把 AVM 合成画面当**一路虚拟相机**（cameraId=0 / `video51`）暴露，不是四路独立物理相机；
+     打灯要的侧后广角靠切 `display-mode=8`（2×2 四宫格）再裁象限拿到。
+   - **切不到鱼眼有两层根因（V5.10.0.8814 真机实测，对照能出鱼眼的 P7打灯转向辅助 v1.46）**，
+     缺一不可：
+     1. **只写裸 `display-mode` —— 千万别补配套字段**：v1.46 下发原文就是
+        `params =display-mode=8`，紧接着 `XpCameraCmdController: setAvmControlMode()` 被触发、
+        打印 `displaymode:8, Overlaywkst:-1,...`（配套全 -1=未设），随后 connect camera 0
+        出四路鱼眼。反之补齐 `overlay-workst/out-mode/transbody` 等字段时，controller 的
+        `setAvmControlMode()` 根本不被调用，视角停在三分屏——**"参数不完整被丢弃"是错判，
+        多写字段才是毒药**。`AvmMode` 现刻意只写裸字段，普通 `set` 优先、`earlyset` 兜底。
+     2. **下发与取流必须同源（cameraId 一致）**：`display-mode=8` 只作用于 cameraId=0
+        那一路流（真机 logcat `setCmdControlParameters ... cameraId =0`）。若打灯取流打开的是
+        cameraId=1，四宫格根本不在这路上，表现为「下发成功但画面不变」。原仓库同样是
+        「下发 0 + openCamera ids[0]=video51」，且注明 ids[1]/video52 画面会缺一块。现在
+        `mirrorAvm` 打开时强制用 camera 0 取流，避免左右灯分设 0/1 导致右灯取错路。
+     下发成功即按四宫格裁（左灯左下格、右灯右下格），失败退回三分屏侧栏 ROI。
+     排查手法：`adb logcat` 里搜 `XpCameraCmdController`——有 `setAvmControlMode()` 就是
+     controller 真生效了；只有 `CameraService: setCmdControlParameters` 而没这行，就是
+     下发的字段让 controller 拒绝了。
+     调试口：`am broadcast -f 0x01000000 -a com.xiaopeng.clusterassist.AVM --ei mode 8
+     --ez dump true`（`-f` 是前台广播标志，否则被后台执行限制拦掉）。
+   - **取景偏向车尾（APP 内可调）**：四宫格每格默认整格=该侧完整鱼眼。真机调定「放大 2 倍
+     突出车尾、舍弃车头」：右灯窗口右移 `panx=+0.8`、左灯因鱼眼镜像取 `-0.8`，各存一套不共用。
+     **调节入口**：APP「显示」页 →「取景微调（放大车尾，舍弃车头）」区：
+       - 总开关：开=按参数微调，关=整格显示完整鱼眼。
+       - 左右各三组步进器（放大倍数 1.0~3.0 / 左右偏向 −1~+1 / 上下偏向 −1~+1），
+         点 `−`/`+` 每次 0.1，**打灯状态下实时生效下一帧就变**，并自动存盘（改完不用装机）。
+       - 「复位默认」按钮恢复出厂值（右 2.0/+0.8、左 2.0/−0.8）。
+       参数落在 SharedPreferences 的 `quad*` 键，进程重启后打灯时自动恢复。
+     **adb 调试口**（等价、无需打开 APP）：`am broadcast -f 0x01000000 -a
+     com.xiaopeng.clusterassist.AVM --ei side 2 --ef zoom 2.0 --ef panx 0.8 --ef pany 0`
+     （`side` 0=左右都设/1=左/2=右；`--ef zoom 0` 复位整格）。注意广播只改本次进程内存、
+     不写盘，重启后以 APP 存的值为准。
+   - 参数对象的 `getAvmDisplayMode()`/`flatten()` 在本车抛异常，读回只能直读内部
+     `LinkedHashMap mMap` 的 `display-mode` 键（`AvmMode.current()` 已按 getter→flatten→mMap 三级兜底）。
+
 ---
 
 ## 五、目录
@@ -240,6 +305,9 @@ instrument/
   chargewarn.go    充电警示文案表
   canvas.go fb.go  framebuffer 与绘制
   rgb565.go        RGB565 最近邻取码与 8×8 Bayer 抖动（见第四节第 7 条）
+  mirror.go        打灯影像：帧头协议、影像区几何（见第四节第 9 条）
+  mirror_srv.go    打灯影像：TCP 收帧、zstd 解压、帧槽交接
+  rectutil.go      矩形减法（把影像区从脏矩形里裁掉）
   bgmap.go         原厂底图色值表取样：歌词卡片底色按屏幕坐标从底图取色
   bgmap_data.go    色值表数据，由 tools/gen_bgmap.py 生成，勿手改
   ...
@@ -254,6 +322,21 @@ instrument/
 - `get_host_icm_charging_duration` 返回 `[-1,0,0]`，充电时长不可用。
 - 电池温度/充电口温度在部分桩上返回 0 且 `cellOK/portOK=false`。
 - 仪表固件升级后属性名/枚举可能变化，需重新标定（App 内「充电数据自检 → 查看充电原始数据」可以导出原始值）。
+- 打灯影像一期只到约 15fps（受主循环 50ms 节拍与 zstd 软解限制），二期换 `/dev/mxc_vpu` 硬解才能上 30fps。
+- 影像功能需要车机端主动推流；车机没推时仪表侧完全静默，`video.enable=true` 也不会多占 CPU。
+
+### 仪表端部署约束（真机踩出来的，别绕）
+
+1. **ftpd 不支持 `SITE CHMOD`**，新建文件一律 `644`，只有**覆盖已存在文件**才保留原权限。
+   所以部署新二进制必须走 `p7assist.new` + 热升级（`syscall.Exec` 原地替换，PID 不变），
+   **不要 `STOR` 覆盖 `p7assist` 本体** —— 会掉执行位，重启后 `p7boot.sh` 起不来。
+   `p7boot.sh` 每次开机自己 `chmod 755`，是唯一能自愈的兜底。
+2. **30510 通道在仪表重启窗口期"连得上但零响应"**，不是通道坏了。车机 `adb server` 也会
+   卡成 `device offline`，命令根本没发到车上。判断通道死了之前先 `adb kill-server` 重来一遍。
+3. **影像帧头第 5 字节是 codec**（`0=raw / 1=zstd`）。写错不会报错，服务端走 raw 分支长度
+   校验失败后**静默丢帧**，表现是连接 ESTABLISHED、Send-Q 一直积压、画面不出、日志空白。
+4. 车机 → 仪表链路实测 **11.01 MB/s（92 Mbps）**，写屏 **175 MB/s**，JPEG 软解约 **20M 像素/s**，
+   `p7assist` 自身已占 50% 单核。这四条是尺寸与编码方式的硬边界，改方案前先拿它们对一遍。
 
 ---
 

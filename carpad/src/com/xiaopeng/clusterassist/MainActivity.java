@@ -60,8 +60,11 @@ public class MainActivity extends Activity {
 
     private PillSwitch swMaster, swTpmsP, swTpmsD, swBsd, swTpmsHi, swCabin, swVolt, swNav, swLyric,
             swLyricBottom, swTripDist, swTripTime, swTripSpeed, swTripKwh, swDebug, swBridge, swTl,
-            swTlDemo;
+            swTlDemo, swMirror;
     private TextView tvZoomSpeed, tvZoomMs, tvScale, tvDx, tvDy, btnDayNight;
+    private TextView tvMirrorCamL, tvMirrorCamR;
+    // 取景微调步进器数值回显（左右各 zoom/panx/pany）
+    private TextView tvQZoomL, tvQPanXL, tvQPanYL, tvQZoomR, tvQPanXR, tvQPanYR;
     private EditText etHost, etPort, etUser, etPass;
 
     /** 打开「歌词显示在下方」之前，底部中央区域四个开关的状态（bit0~3），-1 = 没有备份 */
@@ -94,6 +97,13 @@ public class MainActivity extends Activity {
         buildUi();
         selectPage(0);
         if (prefs.bridge && prefs.master) PushService.start(this);
+        // 打灯影像要用相机：targetSdk 28 必须运行时授权，否则采集端只会在日志里报缺权限
+        if (prefs.mirror && checkSelfPermission(android.Manifest.permission.CAMERA)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            try {
+                requestPermissions(new String[]{android.Manifest.permission.CAMERA}, 1001);
+            } catch (Throwable ignored) { }
+        }
         main.postDelayed(new Runnable() {
             @Override public void run() { testConnection(false); }
         }, 350);
@@ -538,6 +548,48 @@ public class MainActivity extends Activity {
                 new Setter() { @Override public void set(boolean v) { prefs.tpmsHi = v; } });
         swTpmsHi = (PillSwitch) r6.getTag();
         p.addView(ui.pair(r3, r6));
+
+        // 打灯影像：把该侧相机画面推到仪表半屏（960×540）。默认关——它会盖住半屏。
+        p.addView(ui.group("打灯影像（推到仪表半屏）"));
+        LinearLayout r7 = toggle("打灯影像", "960×540",
+                "打左/右转向灯时，把该侧相机画面推到仪表左/右半屏；松灯约 1 秒后自动撤区。\n"
+                        + "倒挡、双闪不触发。需要仪表端 2.14.0+ 且车机已授予相机权限。",
+                prefs.mirror,
+                new Setter() { @Override public void set(boolean v) { prefs.mirror = v; } });
+        swMirror = (PillSwitch) r7.getTag();
+        p.addView(r7);
+
+        // 视角来源：车机把 AVM 合成画面当一路相机暴露出来，默认是 360 俯视 + 前视。
+        // 打灯要看的是侧后方广角，所以默认切到四路鱼眼四宫格再裁对应象限。
+        LinearLayout r8 = toggle("鱼眼视角", "四路鱼眼",
+                "开：打灯时把 AVM 切到四路鱼眼四宫格，取该侧广角视野，松灯自动还原。\n"
+                        + "关：直接用 AVM 默认的 360 俯视 + 前视拼接画面。",
+                prefs.mirrorAvm,
+                new Setter() { @Override public void set(boolean v) { prefs.mirrorAvm = v; } });
+        p.addView(r8);
+
+        // 相机 id 是实车标定的（哪一路是左后/右后没有统一约定），所以给两个步进器现场调。
+        LinearLayout mcL = ui.stepperItem("影像源 · 左灯相机", "id " + prefs.mirrorCamL,
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpMirrorCam(true, -1); }
+                },
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpMirrorCam(true, 1); }
+                });
+        tvMirrorCamL = (TextView) mcL.getTag();
+        p.addView(mcL);
+        LinearLayout mcR = ui.stepperItem("影像源 · 右灯相机", "id " + prefs.mirrorCamR,
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpMirrorCam(false, -1); }
+                },
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpMirrorCam(false, 1); }
+                });
+        tvMirrorCamR = (TextView) mcR.getTag();
+        p.addView(mcR);
+        p.addView(ui.hint("相机 id 在 0~7 之间循环。哪一路是左后/右后因车而异，打灯实测着调"));
+
+        buildQuadCropUi(p);
 
         // 底部中央区域：里程 / 时间 / 平均车速 / 平均能耗
         p.addView(ui.group("底部中央区域"));
@@ -1679,6 +1731,137 @@ public class MainActivity extends Activity {
     // ---------------- 开关/部件 ----------------
 
     private interface Setter { void set(boolean v); }
+
+    /** 相机 id 在 0~7 之间循环；改完立刻存盘，轮询下一拍就用新值。 */
+    private void bumpMirrorCam(boolean left, int delta) {
+        int n = 8;
+        int v = left ? prefs.mirrorCamL : prefs.mirrorCamR;
+        v = ((v + delta) % n + n) % n;
+        if (left) prefs.mirrorCamL = v; else prefs.mirrorCamR = v;
+        prefs.save(this);
+        TextView tv = left ? tvMirrorCamL : tvMirrorCamR;
+        if (tv != null) tv.setText("id " + v);
+    }
+
+    // ===== 取景微调 UI（四宫格鱼眼放大车尾）=====
+
+    /** 参数种类：缩放 / 左右偏 / 上下偏。 */
+    private static final int Q_ZOOM = 0, Q_PANX = 1, Q_PANY = 2;
+
+    /** 构建「取景微调」区：总开关 + 左右各三组步进器 + 说明 + 复位。 */
+    private void buildQuadCropUi(LinearLayout p) {
+        p.addView(ui.group("取景微调（放大车尾，舍弃车头）"));
+        LinearLayout sw = toggle("取景微调", "实时生效",
+                "开：四宫格里把该侧鱼眼按下面的参数放大、往车尾偏。\n"
+                        + "关：整格显示该侧完整鱼眼，不做任何偏向。",
+                prefs.quadCropEnable,
+                new Setter() { @Override public void set(boolean v) {
+                    prefs.quadCropEnable = v;
+                    MirrorSource.setQuadCropEnabled(v);
+                } });
+        p.addView(sw);
+
+        // 左灯（panx 为负=窗口左移，因左后鱼眼车尾在画面左侧）
+        p.addView(ui.hint("— 左灯（打左转向灯）—"));
+        tvQZoomL = quadStepperRow(p, "左 · 放大倍数", 1);
+        tvQPanXL = quadStepperRow(p, "左 · 左右偏向", 2);
+        tvQPanYL = quadStepperRow(p, "左 · 上下偏向", 3);
+
+        // 右灯（panx 为正=窗口右移）
+        p.addView(ui.hint("— 右灯（打右转向灯）—"));
+        tvQZoomR = quadStepperRow(p, "右 · 放大倍数", 4);
+        tvQPanXR = quadStepperRow(p, "右 · 左右偏向", 5);
+        tvQPanYR = quadStepperRow(p, "右 · 上下偏向", 6);
+
+        p.addView(ui.buttonRow(
+                ui.button("复位默认", false, new View.OnClickListener() {
+                    @Override public void onClick(View v) { resetQuadCrop(); }
+                })));
+        p.addView(ui.hint("放大 1.0=整格原样，越大车尾越大（1.0~3.0）。"
+                + "偏向 −1~+1：把取景窗往该方向挪，正=右/下，负=左/上。"
+                + "左右鱼眼互为镜像，两侧偏向值通常互为相反数。改完实时生效并自动保存。"));
+    }
+
+    /**
+     * 加一行步进器。slot 编码：1/2/3 = 左灯 zoom/panx/pany，4/5/6 = 右灯 zoom/panx/pany。
+     * 返回数值 TextView 供回显。
+     */
+    private TextView quadStepperRow(LinearLayout p, final String label, final int slot) {
+        final int side = slot <= 3 ? 1 : 2;
+        final int kind = (slot - 1) % 3;   // 0=zoom 1=panx 2=pany
+        LinearLayout row = ui.stepperItem(label, quadValueText(slot),
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpQuad(slot, side, kind, -1); }
+                },
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpQuad(slot, side, kind, +1); }
+                });
+        p.addView(row);
+        return (TextView) row.getTag();
+    }
+
+    /** 按 0.1 步进改一个取景参数，夹到合法区间，实时下发 MirrorSource 并存盘。 */
+    private void bumpQuad(int slot, int side, int kind, int dir) {
+        float step = 0.1f * dir;
+        switch (kind) {
+            case Q_ZOOM:
+                if (side == 1) prefs.quadZoomL = clamp(prefs.quadZoomL + step, 1f, 3f);
+                else prefs.quadZoomR = clamp(prefs.quadZoomR + step, 1f, 3f);
+                break;
+            case Q_PANX:
+                if (side == 1) prefs.quadPanXL = clamp(prefs.quadPanXL + step, -1f, 1f);
+                else prefs.quadPanXR = clamp(prefs.quadPanXR + step, -1f, 1f);
+                break;
+            case Q_PANY:
+                if (side == 1) prefs.quadPanYL = clamp(prefs.quadPanYL + step, -1f, 1f);
+                else prefs.quadPanYR = clamp(prefs.quadPanYR + step, -1f, 1f);
+                break;
+        }
+        // 实时生效：当前正在推流时下一帧就按新参数裁
+        MirrorSource.setQuadCrop(side,
+                side == 1 ? prefs.quadZoomL : prefs.quadZoomR,
+                side == 1 ? prefs.quadPanXL : prefs.quadPanXR,
+                side == 1 ? prefs.quadPanYL : prefs.quadPanYR);
+        prefs.save(this);
+        refreshQuadViews();
+    }
+
+    private static float clamp(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    /** 复位成出厂默认（右 2.0/+0.8，左 2.0/-0.8，上下 0）。 */
+    private void resetQuadCrop() {
+        prefs.quadCropEnable = true;
+        prefs.quadZoomL = 2.0f; prefs.quadPanXL = -0.8f; prefs.quadPanYL = 0f;
+        prefs.quadZoomR = 2.0f; prefs.quadPanXR = +0.8f; prefs.quadPanYR = 0f;
+        MirrorSource.setQuadCropEnabled(true);
+        MirrorSource.applyFromPrefs(prefs);
+        prefs.save(this);
+        refreshQuadViews();
+        syncProjectButtons();
+    }
+
+    private String quadValueText(int slot) {
+        int side = slot <= 3 ? 1 : 2;
+        int kind = (slot - 1) % 3;
+        if (kind == Q_ZOOM) return String.format("%.1f×", side == 1 ? prefs.quadZoomL : prefs.quadZoomR);
+        if (kind == Q_PANX) return fmtPan(side == 1 ? prefs.quadPanXL : prefs.quadPanXR);
+        return fmtPan(side == 1 ? prefs.quadPanYL : prefs.quadPanYR);
+    }
+
+    private static String fmtPan(float v) {
+        return (v > 0 ? "+" : "") + String.format("%.1f", v);
+    }
+
+    private void refreshQuadViews() {
+        if (tvQZoomL != null) tvQZoomL.setText(quadValueText(1));
+        if (tvQPanXL != null) tvQPanXL.setText(quadValueText(2));
+        if (tvQPanYL != null) tvQPanYL.setText(quadValueText(3));
+        if (tvQZoomR != null) tvQZoomR.setText(quadValueText(4));
+        if (tvQPanXR != null) tvQPanXR.setText(quadValueText(5));
+        if (tvQPanYR != null) tvQPanYR.setText(quadValueText(6));
+    }
 
     private LinearLayout toggle(String title, String tag, String desc, boolean val, final Setter setter) {
         return ui.toggleItem(title, tag, desc, val, new PillSwitch.OnChange() {

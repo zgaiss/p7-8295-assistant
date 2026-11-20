@@ -89,6 +89,10 @@ type fbDev struct {
 	lineLen int
 	w, h    int
 	bg      *bgDev // 原生层 fb0，用于把半透明像素正确合成到背景上
+
+	// scaleRow 是放大时的行暂存区（可缓存内存）。只在直写通道（网络线程）
+	// 使用，复用以避免 20fps 下每秒分配。
+	scaleRow []byte
 }
 
 // ---------- 原生图层 fb0（只读） ----------
@@ -400,6 +404,73 @@ func (d *fbDev) blit(cv *canvas, b rect) {
 			row[p+1] = byte(v >> 8)
 		}
 	}
+}
+
+// write565Rect 把一整帧已打包好的 RGB565 直接搬进 fb1 的目标矩形。
+//
+// 与 blit 的区别：这里**不解包、不混合、不查背景**。像素进来就是 fb1 的
+// 最终内存布局（小端 16bpp），一行 960 像素 = 1920 字节，用 copy 整行搬。
+//
+// 为什么必须走这条路：blit 是逐像素带分支写（还要按 alpha 和 fb0 混合），
+// 全屏实测 95ms；而整行 memmove 两个数量级更快。影像 960×540 = 1.0MB，
+// 按 175MB/s 约 6ms，15fps 才占得住这颗 CPU。
+//
+// 返回写入的像素行数，0 表示没写（尺寸不符或矩形越界）。
+func (d *fbDev) write565Rect(b rect, pix []byte, srcW, srcH int) int {
+	b = b.clamp()
+	if b.empty() || srcW <= 0 || srcH <= 0 {
+		return 0
+	}
+	w := int(b.x1) - int(b.x0)
+	h := int(b.y1) - int(b.y0)
+	if w != srcW || h > srcH {
+		return 0 // 宽度对不上就没法整行搬；宁可整帧不写，也不要写半块留残影
+	}
+	rowBytes := srcW * 2
+	for y := 0; y < h; y++ {
+		dy := int(b.y0) + y
+		if dy < 0 || dy >= d.h {
+			continue
+		}
+		so := y * srcW * 2
+		if so+rowBytes > len(pix) {
+			break
+		}
+		row := d.mem[dy*d.lineLen:]
+		do := int(b.x0) * 2
+		if do+rowBytes > len(row) {
+			break
+		}
+		copy(row[do:do+rowBytes], pix[so:so+rowBytes])
+	}
+	return h
+}
+
+// write565Scaled 把 srcW×srcH 的整帧（RGB565，小端）映射进 b。
+//
+// srcW==b 宽时走整行 copy（与原 write565Rect 等价）；否则最近邻放大/缩小。
+// 存在的理由：raw 模式受链路带宽限制，车机降到 640×360 推流，仪表负责
+// 补回 960×540。放大比整行 memcpy 贵，但远低于一次 deflate 解压。
+func (d *fbDev) write565Scaled(b rect, pix []byte, srcW, srcH int) int {
+	b = b.clamp()
+	if b.empty() || srcW <= 0 || srcH <= 0 {
+		return 0
+	}
+	w := int(b.x1) - int(b.x0)
+	h := int(b.y1) - int(b.y0)
+	x0, y0 := int(b.x0), int(b.y0)
+	if w <= 0 || h <= 0 || x0+w > d.w || y0+h > d.h {
+		return 0
+	}
+	dst := d.mem[y0*d.lineLen+x0*2:]
+	stride := d.lineLen / 2
+	if !scale565SameSize(dst, stride, w, h, pix, srcW, srcH) {
+		if len(d.scaleRow) < w*2 {
+			d.scaleRow = make([]byte, w*2)
+		}
+		scale565NN(dst, stride, w, h, pix, srcW, srcH, d.scaleRow)
+	}
+	return h
 }
 
 func readSys(name string) string {
