@@ -114,6 +114,21 @@ public class MainActivity extends Activity {
                 main.postDelayed(this, 1500);
             }
         }, 1500);
+        // 昼夜自动跟随：这台车机切昼夜不一定发标准 UiMode 配置变更，
+        // 每 30s 用与仪表同一套逻辑判一次；变了就重建界面换配色。
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (NightMode.isNight(MainActivity.this) != ui.night) {
+                        android.util.Log.i("P7Night",
+                                "昼夜变化，重建界面 " + (ui.night ? "夜间→日间" : "日间→夜间"));
+                        recreate();
+                        return; // 旧 Activity 不再排下一次检查；新的 onCreate 会排
+                    }
+                } catch (Throwable ignored) { }
+                main.postDelayed(this, 30000);
+            }
+        }, 30000);
     }
 
     /** 刷新「本地ADB授权」卡片：文字 + 按状态着色（绿=已授权，橙=等待确认，红=未授权） */
@@ -186,7 +201,14 @@ public class MainActivity extends Activity {
 
         View spacer = new View(this);
         side.addView(spacer, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        TextView ver = ui.t("v2.0.0", 10, ui.textVer);
+        // 左下角版本号从 manifest 读，永远跟随 versionName——之前写死 v2.0.0 从不更新。
+        String appVer;
+        try {
+            appVer = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Throwable t) {
+            appVer = "?";
+        }
+        TextView ver = ui.t("v" + appVer, 10, ui.textVer);
         ver.setGravity(Gravity.CENTER);
         side.addView(ver, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1907,7 +1929,11 @@ public class MainActivity extends Activity {
     // ---------------- 行为 ----------------
 
     private void toast(String s) {
-        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+        // 车机底部有系统栏/导航区，默认 toast 位置经常被盖住；
+        // 全部提示统一移到顶部居中，并留出状态栏高度。
+        Toast t = Toast.makeText(this, s, Toast.LENGTH_SHORT);
+        t.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL, 0, 96);
+        t.show();
     }
 
     /** 投放 = 全局开关 */
@@ -2432,6 +2458,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // recreate() 换昼夜配色时，旧实例的循环任务必须停掉：
+        // 否则 refreshAdbAuth / 连接自检还挂在旧对象上继续跑。
+        main.removeCallbacksAndMessages(null);
         pool.shutdownNow();
         deploy.reset();
     }

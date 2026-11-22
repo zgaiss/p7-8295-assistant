@@ -887,19 +887,68 @@ func (c *canvas) floorKey(x0, y0, x1, y1 float64) {
 	c.dirty.add(x0, y0, x1, y1)
 }
 
-// strokeArc 圆弧（用于盲区提示），ang 为角度制（0=右，顺时针向下为正）
+// strokeArc 抗锯齿椭圆弧描边（用于盲区提示），角度制（0=右，顺时针向下为正）。
+//
+// 原来是 24 段折线 + thickLine(fillRect) 硬画：5px 宽的弧在 1920×720 上
+// 边缘全是台阶，和字体/圆角卡片的平滑边缘放一起很突兀。
+// 现在和 strokeRoundRectAA 走同一套：SDF 算环带覆盖率 → blendPx 逐像素混合。
+// 环带两侧各留 0.5px 渐变，两个端点也按到端点射线的有符号距离做 0.5px 渐变。
 func (c *canvas) strokeArc(cx, cy, rx, ry, a0, a1, w float64, col color.RGBA) {
-	steps := 24
-	px, py := 0.0, 0.0
-	for i := 0; i <= steps; i++ {
-		a := (a0 + (a1-a0)*float64(i)/float64(steps)) * math.Pi / 180
-		x := cx + rx*math.Cos(a)
-		y := cy + ry*math.Sin(a)
-		if i > 0 {
-			c.thickLine(px, py, x, y, w, col)
-		}
-		px, py = x, y
+	arx, ary := math.Abs(rx), math.Abs(ry)
+	if arx < 0.5 || ary < 0.5 || w <= 0 || a1 <= a0 {
+		return
 	}
+	// 端点射线方向（椭圆参数角对应的点），归一化后叉积就是到射线的垂直距离。
+	// 这里必须用**带符号的 rx**：rx<0 是右弧的左右镜像，端点方向也要跟着镜像，
+	// 否则叉积会把可见侧判反（右弧被裁掉半截）。
+	s0, s1 := a0*math.Pi/180, a1*math.Pi/180
+	e0x, e0y := rx*math.Cos(s0), ry*math.Sin(s0)
+	e1x, e1y := rx*math.Cos(s1), ry*math.Sin(s1)
+	l0, l1 := math.Hypot(e0x, e0y), math.Hypot(e1x, e1y)
+	if l0 == 0 || l1 == 0 {
+		return
+	}
+	e0x, e0y = e0x/l0, e0y/l0
+	e1x, e1y = e1x/l1, e1y/l1
+	// 镜像后「角度增大」对应的叉积符号也翻转。
+	sign := 1.0
+	if rx < 0 {
+		sign = -1
+	}
+	rmin := math.Min(arx, ary)
+	m := w/2 + 1
+	b := c.img.Bounds()
+	ca := int(col.A)
+	for y := int(math.Floor(cy - ary - m)); y <= int(math.Ceil(cy+ary+m)); y++ {
+		if y < b.Min.Y || y >= b.Max.Y {
+			continue
+		}
+		for x := int(math.Floor(cx - arx - m)); x <= int(math.Ceil(cx+arx+m)); x++ {
+			if x < b.Min.X || x >= b.Max.X {
+				continue
+			}
+			dx, dy := float64(x)+0.5-cx, float64(y)+0.5-cy
+			// 椭圆归一化距离 → 近似像素距离（长短轴接近时足够准）
+			q := math.Sqrt((dx/arx)*(dx/arx) + (dy/ary)*(dy/ary))
+			d := (q - 1) * rmin
+			cov := w/2 - math.Abs(d) + 0.5 // 环带 |d|<=w/2，两侧 0.5px 渐变
+			if cov <= 0 {
+				continue
+			}
+			// 起点/终点各留 0.5px 渐变，端点不是硬切
+			cov0 := 0.5 + sign*(e0x*dy-e0y*dx)
+			cov1 := 0.5 - sign*(e1x*dy-e1y*dx)
+			cov = math.Min(cov, math.Min(cov0, cov1))
+			if cov <= 0 {
+				continue
+			}
+			if cov > 1 {
+				cov = 1
+			}
+			c.blendPx(x, y, col, int(cov*float64(ca)))
+		}
+	}
+	c.dirty.add(cx-arx-m, cy-ary-m, cx+arx+m, cy+ary+m)
 }
 
 // blendPanel 调试面板的深色底

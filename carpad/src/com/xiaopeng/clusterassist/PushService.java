@@ -5,7 +5,6 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.app.UiModeManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
@@ -117,7 +116,8 @@ public class PushService extends Service {
     // 用户的明确要求是：失效就回原厂界面，让问题暴露出来。
     // 所以这里不再有任何推帧逻辑，仪表没收到帧就不接管充电页。
 
-    /** 盲区快速轮询：200ms 一次读常驻探针缓存（近零延迟），变化立即推送 */    private final Runnable bsdTick = new Runnable() {
+    /** 盲区快速轮询：200ms 一次读常驻探针缓存（近零延迟），变化立即推送 */
+    private final Runnable bsdTick = new Runnable() {
         @Override public void run() {
             // 必须兜住异常：这里一旦抛出，postDelayed 就不会再执行，盲区轮询会永久停掉
             try {
@@ -139,7 +139,7 @@ public class PushService extends Service {
             } catch (Throwable t) {
                 android.util.Log.w("P7Bsd", "盲区轮询异常: " + t);
             }
-            handler.postDelayed(this, 200);
+            handler.postDelayed(this, 50);
         }
     };
 
@@ -765,108 +765,9 @@ public class PushService extends Service {
     private static final java.util.concurrent.Semaphore pushLock =
             new java.util.concurrent.Semaphore(1, true);
 
-    /**
-     * 判断当前是否夜间。
-     *
-     * 踩过的坑：`persist.sys.theme` 只在用户**锁定**白天/夜间时被车机写入，切回「自动」后
-     * 它会**停留在上一次锁定的值**（实测：锁定夜间 → 切回自动，仍是 2）。之前只认它，
-     * 于是白天中控已经变白、仪表还在画夜间配色。`last_override_night_mode` 和
-     * `ui_night_mode_last_computed` 实测全程不动，也是死值。
-     *
-     * 现在按"用户意图 + 天文时间"两级判断：
-     *   1. UiModeManager.getNightMode()：1=锁定白天 / 2=锁定夜间 → 直接采用（最准）；
-     *   2. 0=自动 → 按经纬度算日出日落（车机存着 persist.sys.theme.latitude/longitude），
-     *      不依赖任何会卡住的系统状态；
-     *   3. 兜底：6:00–18:00 为白天。
-     */
+    /** 判断当前是否夜间：与车机 App 主题共用 NightMode 的同一套逻辑 */
     private boolean isNight() {
-        int mode = -1;
-        try {
-            UiModeManager um = (UiModeManager) getSystemService(Context.UI_MODE_SERVICE);
-            if (um != null) mode = um.getNightMode();
-        } catch (Throwable ignored) { }
-        if (mode == UiModeManager.MODE_NIGHT_YES) { nightDiag("锁定夜间"); return true; }
-        if (mode == UiModeManager.MODE_NIGHT_NO) { nightDiag("锁定白天"); return false; }
-
-        Boolean bySun = nightBySun();
-        if (bySun != null) return bySun.booleanValue();
-
-        nightDiag("无有效经纬度，回落 6:00-18:00");
-        int h = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY);
-        return h < 6 || h >= 18;
-    }
-
-    private String lastNightDiag;
-
-    private void nightDiag(String s) {
-        if (!s.equals(lastNightDiag)) {
-            lastNightDiag = s;
-            Log.i("P7Night", s);
-        }
-    }
-
-    /** 自动档：按经纬度算日出日落；经纬度不可用返回 null */
-    private Boolean nightBySun() {
-        double lat = numProp("persist.sys.theme.latitude");
-        double lon = numProp("persist.sys.theme.longitude");
-        if (Double.isNaN(lat) || Double.isNaN(lon)) return null;
-        if (Math.abs(lat) < 0.01 && Math.abs(lon) < 0.01) return null;
-        java.util.Calendar now = java.util.Calendar.getInstance();
-        double rise = sunEvent(now, lat, lon, true);
-        double set = sunEvent(now, lat, lon, false);
-        if (Double.isNaN(rise) || Double.isNaN(set)) return null;
-        double h = now.get(java.util.Calendar.HOUR_OF_DAY) + now.get(java.util.Calendar.MINUTE) / 60.0;
-        boolean day = h >= rise && h < set;
-        nightDiag(String.format(java.util.Locale.US,
-                "自动：日出 %.2f 日落 %.2f 现在 %.2f → %s", rise, set, h, day ? "白天" : "夜间"));
-        return Boolean.valueOf(!day);
-    }
-
-    private double numProp(String k) {
-        try {
-            String v = getSystemProperty(k);
-            return v == null || v.trim().isEmpty() ? Double.NaN : Double.parseDouble(v.trim());
-        } catch (Throwable t) {
-            return Double.NaN;
-        }
-    }
-
-    /** NOAA 简化算法：返回本地小时（0–24）；极昼/极夜返回 NaN */
-    private static double sunEvent(java.util.Calendar day, double lat, double lon, boolean isRise) {
-        int n = day.get(java.util.Calendar.DAY_OF_YEAR);
-        double tzH = day.getTimeZone().getOffset(day.getTimeInMillis()) / 3600000.0;
-        double lngHour = lon / 15.0;
-        double t = n + ((isRise ? 6 : 18) - lngHour) / 24.0;
-        double M = 0.9856 * t - 3.289;
-        double L = M + 1.916 * Math.sin(Math.toRadians(M)) + 0.020 * Math.sin(Math.toRadians(2 * M)) + 282.634;
-        L = ((L % 360) + 360) % 360;
-        double ra = Math.toDegrees(Math.atan(0.91764 * Math.tan(Math.toRadians(L))));
-        ra = ((ra % 360) + 360) % 360;
-        double lq = Math.floor(L / 90) * 90;
-        double raq = Math.floor(ra / 90) * 90;
-        ra = (ra + (lq - raq)) / 15.0;
-        double sinDec = 0.39782 * Math.sin(Math.toRadians(L));
-        double cosDec = Math.cos(Math.asin(sinDec));
-        double cosH = (Math.cos(Math.toRadians(90.833)) - sinDec * Math.sin(Math.toRadians(lat)))
-                / (cosDec * Math.cos(Math.toRadians(lat)));
-        if (cosH > 1 || cosH < -1) return Double.NaN;
-        double hh = isRise ? 360 - Math.toDegrees(Math.acos(cosH)) : Math.toDegrees(Math.acos(cosH));
-        hh /= 15.0;
-        double tt = hh + ra - 0.06571 * t - 6.622;
-        double ut = ((tt - lngHour) % 24 + 24) % 24;
-        return ((ut + tzH) % 24 + 24) % 24;
-    }
-
-    /** 读系统属性（反射 android.os.SystemProperties，Android 9+ 隐藏 API 需反射） */
-    private static String getSystemProperty(String key) {
-        try {
-            Class<?> c = Class.forName("android.os.SystemProperties");
-            java.lang.reflect.Method m = c.getMethod("get", String.class);
-            Object v = m.invoke(null, key);
-            return v == null ? null : v.toString();
-        } catch (Throwable t) {
-            return null;
-        }
+        return NightMode.isNight(this);
     }
 
     private void updateNotification(String text) {

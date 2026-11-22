@@ -155,7 +155,7 @@ func paintFrame(cv *canvas, cfg Config, s snapshot, park bool, tAnim float64, ni
 	// （对齐原厂 charging.kzb 置顶并隐藏底盘的行为）。
 	// 充电页：只在"充电中"或"调试开关打开"时接管。
 	// 调试开关单独生效——之前要求同时打开「充电界面」，用户点了调试看不到效果。
-	if (cfg.Features.ChargePage && s.chg.on) || cfg.Features.ChargeDebug {
+	if (cfg.Features.ChargePage && s.chg.pageOn) || cfg.Features.ChargeDebug {
 		if paintCharge(cv, cfg, s, tAnim) {
 			return
 		}

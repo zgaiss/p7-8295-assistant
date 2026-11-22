@@ -81,8 +81,10 @@ mkdir -p ../dist
     --out build/apk/signed.apk build/apk/aligned.apk
 
 python "$ROOT/tools/build_version.py" verify --out build --apk build/apk/signed.apk --aapt "$BT/aapt2.exe"
-cp build/apk/signed.apk "../dist/P7仪表助手-原生版.apk.tmp"
-mv -f "../dist/P7仪表助手-原生版.apk.tmp" "../dist/P7仪表助手-原生版.apk"
+# 产物名带版本号（去掉"原生版"），版本号直接取构建快照，永远跟着 manifest 走。
+APK_NAME="P7仪表助手-$(python -c 'import json;print(json.load(open("build/version.json"))["name"])').apk"
+cp build/apk/signed.apk "../dist/$APK_NAME.tmp"
+mv -f "../dist/$APK_NAME.tmp" "../dist/$APK_NAME"
 
-echo "== OK  ->  $HERE/../dist/P7仪表助手-原生版.apk"
-ls -la "../dist/P7仪表助手-原生版.apk"
+echo "== OK  ->  $HERE/../dist/$APK_NAME"
+ls -la "../dist/$APK_NAME"

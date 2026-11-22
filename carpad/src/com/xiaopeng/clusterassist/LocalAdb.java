@@ -76,7 +76,7 @@ public final class LocalAdb {
     private static volatile int fileL = -1, fileR = -1;
     private static volatile long fileAt = 0;
     private static volatile boolean filePollerStarted = false;
-    /** 正在握手/等待授权的那条连接。resetKey 靠它把 190 秒的阻塞握手立刻打断。 */
+    /** 正在握手/等待授权的那条连接。resetKey 靠它把 120 秒的阻塞握手立刻打断。 */
     private static volatile AdbClient connecting;
     /**
      * dumpsys 兜底：直接读 CarPropertyService 自己记的 lastEvent。
@@ -194,7 +194,7 @@ public final class LocalAdb {
 
     /** 重新授权：清掉本地密钥，下次连接生成新钥匙、重新走一遍弹框授权 */    public static void resetKey(final Context c) {
         // 1) 先掐断"正在等授权"的那条连接。
-        //    ensure() 是 synchronized（锁 LocalAdb.class），而它在 connect() 里最长阻塞 190 秒；
+        //    ensure() 是 synchronized（锁 LocalAdb.class），而它在 connect() 里最长阻塞 120 秒；
         //    主线程如果直接进 synchronized，就会卡在这把锁上——实测点了「重新授权」确认后
         //    整个界面卡死随后闪退，就是这个原因。关掉 socket 让 connect 立刻抛异常退出，
         //    类锁马上释放。
@@ -206,6 +206,10 @@ public final class LocalAdb {
         //    （kpCache 是 volatile，直接置空是安全的；若留到后台线程清，用户马上点
         //     「连接并查询」时会拿旧钥匙再试一次，看起来就像"点了没反应"。）
         kpCache = null;
+        // 公钥上报有 60s 进程级冷却（防止"取消"后每次重连都再弹框）。
+        // 点「重新授权」是用户主动要再走一次流程，必须清掉冷却，否则新钥匙
+        // 会因为冷却未过而一直只回签名、弹不出框。
+        AdbClient.clearPublicKeyCooldown();
         try {
             c.getSharedPreferences(SP, Context.MODE_PRIVATE).edit()
                     .remove(KEY).remove(KEY_PUB).commit();
@@ -242,12 +246,12 @@ public final class LocalAdb {
         PrivateKey privKey = kp.getPrivate();
         RSAPublicKey pubKey = (RSAPublicKey) kp.getPublic();
         // 两轮：用户点「允许」之后 adbd 会重启一次，第一条连接常被直接掐断。
-        // 稍等再连一次即可（此时公钥已在 adb_keys 里，不会再弹框）。
+        // 稍等再连一次即可（此时公钥已在 adb_keys 里，第一轮签名就通过，不会再弹框）。
         for (int attempt = 0; attempt < 2; attempt++) {
             AdbClient nc = new AdbClient(privKey, pubKey, "p7assist@xpeng");
             connecting = nc;   // 暴露给 resetKey：用户点「重新授权」时能立刻掐断这次握手
             try {
-                nc.connect(HOST, port(), 190000); // 配对窗口 180s（等用户在车机点「允许」，期间每 30s 重发公钥）
+                nc.connect(HOST, port(), 120000); // 配对窗口 120s；不重发公钥（重发会再弹一次框）
                 client = nc;
                 lastState = "已连接";
                 Log.i(TAG, "本地 adb 已连接");
@@ -262,7 +266,9 @@ public final class LocalAdb {
                 // 每重试一次 adbd 就会再弹一个同样的框，用户看到的就是"要按两次"。
                 if (msg.indexOf("授权超时") >= 0) break;
                 if (attempt == 0) {
-                    try { Thread.sleep(900); } catch (InterruptedException ignored) { }
+                    // 等 adbd 重启 + adb_keys 落盘。太短（原来 900ms）会在
+                    // 车机框架还没处理完授权时重连，导致又走一遍确认流程。
+                    try { Thread.sleep(2000); } catch (InterruptedException ignored) { }
                 }
             } finally {
                 connecting = null;
@@ -323,7 +329,17 @@ public final class LocalAdb {
     public static String shell(Context ctx, String cmd, int timeoutMs) throws Exception {
         AdbClient adb = ensure(ctx);
         if (adb == null) throw new Exception("本地 adb 不可用：" + lastState);
-        return adb.shell(cmd, timeoutMs);
+        try {
+            return adb.shell(cmd, timeoutMs);
+        } catch (java.io.IOException e) {
+            // 命令失败时连接很可能已被标死（写失败 / 超时 / EOF 都会 markDead）。
+            // 立刻丢弃 client，让下一次 ensure() 重新握手——否则红绿灯要等下一轮
+            // 轮询才发现，且如果是半开 socket，dead 未置位时会一直复用死连接。
+            synchronized (LocalAdb.class) {
+                if (!adb.isConnected()) client = null;
+            }
+            throw e;
+        }
     }
 
     /**

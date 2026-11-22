@@ -7,8 +7,9 @@ package main
 // 通条会被压在下面看不见，所以这一层必须自己画。
 //
 // 数据来源的实话（决定了哪些能真出现）：
-//   · 能自己算出来的只有 4 类：续航低(W85)、充电速度慢(W95)、电池加热/冷却
+//   · 能自己算出来的只有 3 类：续航低(W85)、电池加热/冷却
 //     (W93/W94，由状态机给出)、双枪(W10，需左右枪口状态)。
+//     原 W95「充电速度慢」已按需求移除，不再显示。
 //   · 其余（12V 蓄电池电流传感器故障、电池包不匹配、不支持智能放电…）属于
 //     整车故障码，仪表 DBus 上没有对应量，只能等车机端推过来——已预留
 //     snapshot.extWarns 通道，车机侧以后接上就能显示。
@@ -34,7 +35,6 @@ var chgWarnAll = []chgWarnItem{
 	{"W90", "电池温度低，影响充电速度", false, 1},
 	{"W93", "电池加热中", false, 1},
 	{"W94", "电池冷却中", false, 1},
-	{"W95", "充电速度慢", false, 1},
 	{"W97", "请确认拔枪后再驾驶", false, 2},
 	{"W106", "充电口温度过高，导致充电停止", false, 3},
 	{"W121", "该车辆不支持智能放电功能", false, 1},
@@ -55,7 +55,6 @@ func warnByID(id string) (chgWarnItem, bool) {
 // 几个判定阈值（可按实车观感调整）
 const (
 	warnRangeKmLow = 50.0 // 续航低于这个值提示充电（W85）
-	warnSlowKw     = 20.0 // 充电功率低于这个值提示"充电速度慢"（W95）
 	warnTempLowC   = 5.0  // 电芯温度低于此值 → W90
 	warnTempHighC  = 55.0 // 电芯温度高于此值 → W124
 	warnPortHotC   = 70.0 // 充电口温度高于此值 → W106
@@ -70,7 +69,6 @@ const (
 //	host-vcu-batcold-disp        → W90  电池温度低
 //	host-vcu-ind-12v-bat         → W28  低压蓄电池电压过低
 //	host-bcm-l/r-charger-port    → W10  同时插枪（左右都插）
-//	host-vcu-powerlimitation-dsp → W95  充电速度慢（功率受限）
 //	host-vcu-bms-soclow-status   → W85  续航低（SOC 低标志）
 //	host-bcm-chargeport-*-fault  → W106 充电口故障导致停止
 //
@@ -112,9 +110,6 @@ func deriveChargeWarns(ch chargeInfo, st chgState, tm *chgTemps) []chgWarnItem {
 		push("W93")
 	case chgCooling:
 		push("W94")
-	}
-	if st == chgRunning && (ch.pwLimit != 0 || (ch.power > 0 && ch.power < warnSlowKw)) {
-		push("W95")
 	}
 	if !ch.on && (ch.socLow != 0 || (ch.rangeKm > 0 && float64(ch.rangeKm) <= warnRangeKmLow)) {
 		push("W85")
