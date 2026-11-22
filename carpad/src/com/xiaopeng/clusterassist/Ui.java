@@ -1,7 +1,6 @@
 package com.xiaopeng.clusterassist;
 
 import android.content.Context;
-import android.content.res.Configuration;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.util.TypedValue;
@@ -56,8 +55,9 @@ public class Ui {
 
     public Ui(Context c) {
         this.c = c;
-        night = (c.getResources().getConfiguration().uiMode
-                & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        // 和推给仪表的 night 字段走同一套判断。只看 Configuration.uiMode 在这台
+        // 车机上不跟随：切昼夜不总发标准配置变更，界面会停在启动时的配色。
+        night = NightMode.isNight(c);
         if (night) {
             bgRoot = 0xFF15161A; bgMain = 0xFF191A1F; bgNavSel = 0xFF26292E;
             textTitle = 0xFFC9CDD3; textNav = 0xFFB9BEC6; textSub = 0xFF87898F;

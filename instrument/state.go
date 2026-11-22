@@ -60,7 +60,8 @@ const (
 // chargeInfo 充电页数据：全部来自仪表 DBus（不经车机），车机只在缺失时兜底。
 type chargeInfo struct {
 	ok      bool          // 至少拿到一条状态量，读数可信
-	on      bool          // 充电中
+	on      bool          // 充电中（脚在电网上，用于视频模式等）
+	pageOn  bool          // 充电页接管中：充电中 或 完成态尚未拔枪（整屏显示充电完成页）
 	st      chgState      // 推断出的界面态
 	state   int           // host-echarge-status 原始枚举（桩状态，值域待实车标定）
 	mcu     int           // host-mcu-charging-state 原始枚举

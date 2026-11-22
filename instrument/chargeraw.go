@@ -81,9 +81,12 @@ type chgRawDoc struct {
 	Gun      int     `json:"gun"`     // host-vcu-charge-gun-status 原始值
 	St       int     `json:"st"`      // host-echarge-status 原始值
 	State    string  `json:"state"`   // 推断出的界面态名
-	Volt     float64 `json:"volt"`
-	Cur      float64 `json:"cur"`
-	Power    float64 `json:"power"`
+	Volt     float64   `json:"volt"`
+	Cur      float64   `json:"cur"`
+	Power    float64   `json:"power"`
+	RawVolt  []float64 `json:"rawVolt,omitempty"`  // DBus 原始数组，诊断取值用
+	RawCur   []float64 `json:"rawCur,omitempty"`
+	RawPow   []float64 `json:"rawPow,omitempty"`
 	Soc      int     `json:"soc"`
 	LeftMin  int     `json:"leftMin"`
 	RangeKm  int     `json:"rangeKm"`
@@ -157,10 +160,11 @@ func chgStateName(st chgState) string {
 }
 
 // dumpChgRaw 原子写 chgraw.json（tmp + rename，避免读到半截）
-func dumpChgRaw(ci chargeInfo, tm *chgTemps) {
+func dumpChgRaw(ci chargeInfo, tm *chgTemps, rawVolt, rawCur, rawPow []float64) {
 	doc := chgRawDoc{
 		AtMs: time.Now().UnixMilli(), UptimeS: uptimeSec(), Mcu: ci.mcu, Gun: ci.gun, St: ci.state,
 		State: chgStateName(ci.st), Volt: ci.volt, Cur: ci.cur, Power: ci.power,
+		RawVolt: rawVolt, RawCur: rawCur, RawPow: rawPow,
 		Soc: ci.soc, LeftMin: ci.leftMin, RangeKm: ci.rangeKm, DurMin: ci.durMin,
 		On: ci.on, CellProp: chgCellName, PortProp: chgPortName,
 		BatHot: ci.batHot, BatCold: ci.batCold, BatFault: ci.batFault,

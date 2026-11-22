@@ -11,7 +11,6 @@ import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.security.PrivateKey;
-import java.security.Signature;
 import java.security.interfaces.RSAPublicKey;
 
 /**
@@ -28,10 +27,12 @@ import java.security.interfaces.RSAPublicKey;
  *      车机框架永远收不到密钥，授权弹窗永不出现，表现为「等待授权超时」死循环。
  *      对照 P7全视影像 v1.40（车友 adb-auth-demo 方案）修正，实测弹窗恢复。
  *   握手：CNXN(0x01000001, maxdata, "host::\0") → 可能收到 AUTH(1, token) → 回 AUTH(2, RSA-SHA1 签名)
- *         → 若密钥未被授权，服务端再发一个 AUTH(1, token) → 回 AUTH(3, base64(adb 公钥) + " 名字\0")
- *         → 车机屏幕弹「允许 USB 调试」，用户点允许后服务端回 CNXN
- *         等待期间保持连接不关（弹窗绑在这条 TCP 连接上，关了弹窗就消失），
- *         每 30s 重发一次公钥防止弹窗被系统收走（P7全视影像 同款策略，180s 上限）。
+ *         → 若签名被拒（密钥未授权），服务端再发一个 AUTH(1, token) → 回 AUTH(3, base64(adb 公钥) + " 名字\0")
+ *         → 车机屏幕弹「允许 USB 调试」，用户点允许后服务端会**再发一帧 TOKEN 要求重签**
+ *           （证明确实持有私钥），这帧必须回 AUTH(2) 签名；如果又回 AUTH(3) 公钥，
+ *           车机框架会当成"新密钥请求"再弹一次框——实测要点两次的根因。
+ *         等待期间保持连接不关（弹窗绑在这条 TCP 连接上，关了弹窗就消失）。
+ *         公钥一生只上报一次（进程级 60s 冷却），不重发心跳：每次重发公钥都会再弹框。
  *   执行：OPEN(localId, "shell:cmd\0") → OKAY(remoteId, localId) → WRTE 收输出并回 OKAY → CLSE 结束
  */
 public final class AdbClient {
@@ -50,6 +51,21 @@ public final class AdbClient {
     /** 当前握手的授权阶段（给 LocalAdb.authStatus 界面显示用）："" / 签名验证中 / 等待车机确认 / 已授权 */
     public static volatile String phase = "";
 
+    /**
+     * 公钥上报的进程级冷却时间（毫秒）。
+     *
+     * 上报公钥 = 请求车机弹「允许 USB 调试」。同一把钥匙在一条连接里只能报一次，
+     * 跨连接也要隔开——否则用户点「取消」后每次重连都会再弹一个框。
+     * LocalAdb.resetKey()（点「重新授权」）会清零，此时才允许主动再弹一次。
+     */
+    private static final long PUBKEY_COOLDOWN_MS = 60 * 1000L;
+    private static volatile long lastPublicKeyAt = 0;
+
+    /** 清除公钥上报冷却，供「重新授权」按钮调用 */
+    public static void clearPublicKeyCooldown() {
+        lastPublicKeyAt = 0;
+    }
+
     private final PrivateKey key;
     private final RSAPublicKey pub;
     private final String keyName;
@@ -58,6 +74,8 @@ public final class AdbClient {
     private InputStream in;
     private OutputStream out;
     private int nextLocal = 1;
+    /** 对端已关闭 / 读到 EOF：死连接不能继续被 isConnected() 判为可用 */
+    private volatile boolean dead;
 
     public AdbClient(PrivateKey key, RSAPublicKey pub, String keyName) {
         this.key = key;
@@ -66,10 +84,30 @@ public final class AdbClient {
     }
 
     public synchronized boolean isConnected() {
-        return sock != null && sock.isConnected() && !sock.isClosed();
+        // socket.isConnected() 在**对端**关闭后仍返回 true：只看它会把死连接
+        // 反复交给 shell()/read()，表现为命令全超时、CPU 空烧。
+        return !dead && sock != null && sock.isConnected() && !sock.isClosed();
     }
 
-    /** 建立连接并完成握手；authWaitMs 是等待用户点「允许」的最长时间 */
+    /**
+     * 把当前连接标记为死并立刻关闭 socket。
+     *
+     * 车机重启 / adb 掉线重连后，对端 adbd 已经消失，但本端 socket 处于 TCP 半开：
+     * isConnected() 仍返回 true。只有显式置 dead 才能让上层 ensure() 丢弃它、
+     * 重新握手。任何一条 I/O 失败路径（读、写、超时）都必须走这里。
+     */
+    private synchronized void markDead() {
+        dead = true;
+        try { if (sock != null) sock.close(); } catch (Throwable ignored) { }
+    }
+
+    /**
+     * 建立连接并完成握手；authWaitMs 是等待用户点「允许」的最长时间。
+     *
+     * 关键状态不是"这是第几帧 TOKEN"，而是"公钥上报过没有"——批准之后
+     * 车机会再发一帧 TOKEN 要求重签，它和第 2 帧 TOKEN 长得一模一样，
+     * 用计数区分必然把校验帧错答成公钥请求、导致弹第二次框。
+     */
     public synchronized void connect(String host, int port, int authWaitMs) throws Exception {
         close();
         Socket s = new Socket();
@@ -78,15 +116,16 @@ public final class AdbClient {
         sock = s;
         in = s.getInputStream();
         out = s.getOutputStream();
+        dead = false;
 
         s.setSoTimeout(5000);
         send(CMD_CNXN, A_VERSION, MAX_PAYLOAD, ("host::\0").getBytes("UTF-8"));
         phase = "签名验证中";
 
         long deadline = System.currentTimeMillis() + authWaitMs;
-        long lastPub = 0;   // 0 = 尚未上报过公钥
         int rounds = 0;
         int tokenRounds = 0;
+        boolean pubKeyOffered = false;   // 本轮是否已上报过公钥
         while (true) {
             if (System.currentTimeMillis() > deadline) {
                 phase = "";
@@ -94,13 +133,9 @@ public final class AdbClient {
             }
             Packet p = readPacket(6000);
             if (p == null) {
-                // 等授权期间 socket 绝不能关（弹窗绑在这条连接上）；
-                // 每 30s 重发一次公钥，防止弹窗被系统收走（P7全视影像 同款策略）
-                if (lastPub > 0 && System.currentTimeMillis() - lastPub > 30000) {
-                    Log.i(TAG, "配对等待中：30s 无响应，重发公钥保持授权弹窗");
-                    send(CMD_AUTH, 3, 0, publicKeyPayload());
-                    lastPub = System.currentTimeMillis();
-                }
+                // 等授权期间 socket 绝不能关（弹窗绑在这条 TCP 连接上）。
+                // 原来这里每 30s 重发一次公钥"防止弹窗被收走"，但每次重发都是一次
+                // 新的密钥请求，车机框架会再弹一个框——正是"要点两次"的成因之一，删掉。
                 continue;
             }
 
@@ -112,25 +147,30 @@ public final class AdbClient {
             }
             if (p.cmd == CMD_AUTH) {
                 if (p.arg0 == 1) { // TOKEN
-                    // 和官方 adb 客户端一致：第一次用签名试，若服务端又发来一个 token，
-                    // 说明它没有我们的公钥（签名自然对不上），此时必须主动上报公钥，
-                    // 由设备弹出「允许 USB 调试」。一直重签同一个 token 永远不会弹窗。
-                    if (tokenRounds++ == 0) {
-                        byte[] sig = sign(p.data);
-                        send(CMD_AUTH, 2, 0, sig);
+                    if (++rounds > 8) { phase = ""; throw new IOException("授权协商反复失败"); }
+                    if (pubKeyOffered) {
+                        // 公钥已上报过。此后的 TOKEN 只能是"批准后证明持有私钥"的
+                        // 校验帧，或者用户对弹窗没操作的重复探测——两种情况都只回签名。
+                        // 回 AUTH(3) 会被当成新密钥请求 → 第二次弹框。
+                        send(CMD_AUTH, 2, 0, sign(p.data));
+                    } else if (tokenRounds++ == 0) {
+                        // 第一帧 TOKEN 先用签名试：已授权的钥匙在这一步直接通过，零弹框。
+                        send(CMD_AUTH, 2, 0, sign(p.data));
+                    } else if (!pubKeyOffered && sendPublicKeyIfAllowed()) {
+                        // 签名被拒，服务端又发 TOKEN → 上报一次公钥，弹框①。
+                        pubKeyOffered = true;
                     } else {
-                        if (++rounds > 6) { phase = ""; throw new IOException("授权协商反复失败"); }
-                        Log.i(TAG, "上报公钥，等待车机确认");
-                        phase = "等待车机确认";
-                        send(CMD_AUTH, 3, 0, publicKeyPayload());
-                        lastPub = System.currentTimeMillis();
+                        // 已上报过、或处于冷却期（用户刚点过取消）：只回签名，
+                        // 让服务端继续推进，绝不再发 AUTH(3) 叠出第二个框。
+                        send(CMD_AUTH, 2, 0, sign(p.data));
                     }
                 } else if (p.arg0 == 3) { // 服务端明确要求公钥
-                    if (++rounds > 6) { phase = ""; throw new IOException("授权协商反复失败"); }
-                    Log.i(TAG, "密钥未授权，发送公钥，等待车机确认");
-                    phase = "等待车机确认";
-                    send(CMD_AUTH, 3, 0, publicKeyPayload());
-                    lastPub = System.currentTimeMillis();
+                    if (++rounds > 8) { phase = ""; throw new IOException("授权协商反复失败"); }
+                    if (!pubKeyOffered && sendPublicKeyIfAllowed()) {
+                        pubKeyOffered = true;
+                    } else {
+                        send(CMD_AUTH, 2, 0, sign(p.data));
+                    }
                 } else {
                     throw new IOException("未知 AUTH 类型 " + p.arg0);
                 }
@@ -138,6 +178,22 @@ public final class AdbClient {
             }
             throw new IOException("握手阶段收到意外指令 0x" + Integer.toHexString(p.cmd));
         }
+    }
+
+    /**
+     * 上报公钥（=请求车机弹一次「允许 USB 调试」），受进程级冷却限制。
+     *
+     * 全类只有这一处调用 publicKeyPayload()，便于静态核对：不存在第二条
+     * 能发出 AUTH(3) 的路径。返回 false 表示冷却期内，调用方应回签名。
+     */
+    private boolean sendPublicKeyIfAllowed() throws IOException {
+        long now = System.currentTimeMillis();
+        if (now - lastPublicKeyAt < PUBKEY_COOLDOWN_MS) return false;
+        lastPublicKeyAt = now;
+        Log.i(TAG, "上报公钥，等待车机确认");
+        phase = "等待车机确认";
+        send(CMD_AUTH, 3, 0, publicKeyPayload());
+        return true;
     }
 
     /** 执行一条 shell 命令并返回输出 */
@@ -152,6 +208,9 @@ public final class AdbClient {
         while (true) {
             if (System.currentTimeMillis() > deadline) {
                 try { send(CMD_CLSE, local, remote < 0 ? 0 : remote, null); } catch (IOException ignored) { }
+                // 命令读不完：要么对端死了，要么 adbd 卡住。两种都当死连接处理，
+                // 让上层重连——半开 socket 上继续发命令只会一直超时，永远读不到日志。
+                markDead();
                 throw new IOException("shell 超时");
             }
             Packet p = readPacket(6000);
@@ -272,9 +331,16 @@ public final class AdbClient {
         ByteArrayOutputStream h = new ByteArrayOutputStream(24);
         le(h, cmd); le(h, arg0); le(h, arg1);
         le(h, len); le(h, check); le(h, cmd ^ 0xffffffff);
-        out.write(h.toByteArray());
-        if (len > 0) out.write(data);
-        out.flush();
+        try {
+            out.write(h.toByteArray());
+            if (len > 0) out.write(data);
+            out.flush();
+        } catch (IOException e) {
+            // 写失败 = 对端已经断开（半开 socket 写第一次往往还能成功，第二次才报错）。
+            // 必须置 dead，否则 ensure() 会把这条死连接一直当好的返回。
+            markDead();
+            throw e;
+        }
     }
 
     private static final class Packet {
@@ -290,7 +356,6 @@ public final class AdbClient {
         } catch (java.net.SocketTimeoutException e) {
             return null;   // 等授权期间没数据是正常的，交给上层按 deadline 判断
         }
-        if (h == null) return null;
         Packet p = new Packet();
         p.cmd = getInt(h, 0);
         p.arg0 = getInt(h, 4);
@@ -305,8 +370,23 @@ public final class AdbClient {
         byte[] b = new byte[n];
         int off = 0;
         while (off < n) {
-            int r = in.read(b, off, n - off);
-            if (r < 0) return null;
+            int r;
+            try {
+                r = in.read(b, off, n - off);
+            } catch (java.net.SocketTimeoutException e) {
+                // 读超时不当成连接死：等授权 / 慢命令期间超时是正常的，
+                // 交给上层 deadline 判断。这里不能关闭 socket。
+                throw e;
+            } catch (IOException e) {
+                markDead();
+                throw e;
+            }
+            if (r < 0) {
+                // EOF = 对端已经关闭连接。原来返回 null 让 connect()/shell() 在
+                // continue 里空转到 deadline（120s），期间所有调用都堵在死连接上。
+                markDead();
+                throw new IOException("连接已关闭");
+            }
             off += r;
         }
         return b;
@@ -324,12 +404,52 @@ public final class AdbClient {
                 | ((b[off + 2] & 0xff) << 16) | ((b[off + 3] & 0xff) << 24);
     }
 
+    /**
+     * DigestInfo(SHA-1) 的 ASN.1 前缀（15 字节），后面接 20 字节摘要。
+     * AOSP 设备端用 mincrypt `RSA_verify(key, sig, siglen, token, SHA_DIGEST_SIZE)`：
+     * token 已经是 SHA-1 摘要，直接放进 DigestInfo 做 PKCS#1 v1.5 验签，**不再哈希**。
+     */
+    private static final byte[] SHA1_DIGEST_INFO = {
+            0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02,
+            0x1a, 0x05, 0x00, 0x04, 0x14
+    };
+
+    /**
+     * 用私钥对 ADB TOKEN 签名。
+     *
+     * 原来用 `Signature.getInstance("SHA1withRSA")` + update(token)：Java 会先把
+     * token 再哈希一次，而设备端把 token 当作已经算好的摘要，两边摘要不一致 →
+     * 验签必然失败 → adbd 发第二个 TOKEN → 客户端上报公钥 → 弹框。即使公钥早就在
+     * adb_keys 里也照弹不误。这就是"隔一段时间又弹一次"的根因。
+     *
+     * 正确做法（等价 AOSP 主机侧 RSA_sign(NID_sha1, token, 20, ...)）：
+     *   EM = 00 01 FF..FF 00 || DigestInfo(SHA-1) || token(20B)，再对 EM 做裸 RSA 私钥运算。
+     */
     private byte[] sign(byte[] token) throws IOException {
         try {
-            Signature s = Signature.getInstance("SHA1withRSA");
-            s.initSign(key);
-            s.update(token);
-            return s.sign();
+            if (token == null || token.length != 20) {
+                throw new IOException("ADB token 长度异常: " + (token == null ? -1 : token.length));
+            }
+            int modLen = (pub.getModulus().bitLength() + 7) / 8;
+            int diLen = SHA1_DIGEST_INFO.length + token.length; // 15 + 20 = 35
+            if (diLen + 3 > modLen) {
+                throw new IOException("RSA 模长不足: " + modLen);
+            }
+            byte[] em = new byte[modLen];
+            em[0] = 0x00;
+            em[1] = 0x01;
+            for (int i = 2; i < modLen - diLen - 1; i++) {
+                em[i] = (byte) 0xff;
+            }
+            em[modLen - diLen - 1] = 0x00;
+            System.arraycopy(SHA1_DIGEST_INFO, 0, em, modLen - diLen, SHA1_DIGEST_INFO.length);
+            System.arraycopy(token, 0, em, modLen - token.length, token.length);
+
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("RSA/ECB/NoPadding");
+            c.init(javax.crypto.Cipher.ENCRYPT_MODE, key);
+            return c.doFinal(em);
+        } catch (IOException e) {
+            throw e;
         } catch (Exception e) {
             throw new IOException("签名失败: " + e);
         }

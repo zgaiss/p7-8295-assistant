@@ -446,7 +446,7 @@ func watchExt(b *box, stop <-chan struct{}) {
 		select {
 		case <-stop:
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }
@@ -861,7 +861,7 @@ func daemonMain() {
 		// 视频模式的进入条件：真充电，或用户主动打开「充电页调试」。
 		// 调试必须走视频——当前实现就是本地播放器播 charge.pack，调试静态页没有意义
 		// （用户 2026-11-19 明确指出）。文字层由 chargeView 提供，调试时会用演示数据。
-		chgOnNow := (cfg2.Features.ChargePage && bs.chg.on) || cfg2.Features.ChargeDebug
+		chgOnNow := (cfg2.Features.ChargePage && bs.chg.pageOn) || cfg2.Features.ChargeDebug
 		gearHiddenNow := bs.gearOK && bs.gear == 3
 		wantVideo := cfg2.Enabled && chgOnNow && !gearHiddenNow && videoUsable(dir)
 		// 会话状态机（Issue #7）：进入要满足冷却，退出立即生效但设 5s 冷却。
@@ -1043,7 +1043,7 @@ func daemonMain() {
 		tAnim = stepT(tAnim, target, dt, cfg2.Zoom.Ms)
 
 		// 收车机投过来的充电动画帧（一个 stat 的开销；有变化才解码）
-		if (cfg2.Features.ChargePage && s.chg.on) || cfg2.Features.ChargeDebug {
+		if (cfg2.Features.ChargePage && s.chg.pageOn) || cfg2.Features.ChargeDebug {
 			pollChgFrame(dir)
 		}
 
@@ -1051,7 +1051,7 @@ func daemonMain() {
 		// 仪表全屏重绘一次要 300~450ms，如果被 30fps 的 ticker 一直拖着画，
 		// 整个界面（数字、警示）都会跟着卡；改成"有新帧/数据变了才重绘"之后，
 		// 空闲时几乎不占 CPU，观感才正常。
-		if !hidden && ((cfg2.Features.ChargePage && s.chg.on) || cfg2.Features.ChargeDebug) {
+		if !hidden && ((cfg2.Features.ChargePage && s.chg.pageOn) || cfg2.Features.ChargeDebug) {
 			sig := chargeDrawSig(cfg2, s, tAnim)
 			if chargeActive && sig == lastChargeSig {
 				continue
@@ -1072,7 +1072,7 @@ func daemonMain() {
 		// 影像矩形全程由 boxBlit.minus 让路，主循环永远不会写它。
 		tSeg0 := time.Now()
 		if mir != nil {
-			chgNow := (cfg2.Features.ChargePage && s.chg.on) || cfg2.Features.ChargeDebug
+			chgNow := (cfg2.Features.ChargePage && s.chg.pageOn) || cfg2.Features.ChargeDebug
 			f := mir.take()
 			if f != nil {
 				if f.side == mirSideNone {
@@ -1163,7 +1163,7 @@ func daemonMain() {
 		chargeFull := false
 		if !hidden {
 			// 充电页是整屏不透明画面：标记出来，上屏走整块写快路径
-			chargeFull = (cfg2.Features.ChargePage && s.chg.on) || cfg2.Features.ChargeDebug
+			chargeFull = (cfg2.Features.ChargePage && s.chg.pageOn) || cfg2.Features.ChargeDebug
 			paintFrame(cv, cfg2, s, park, tAnim, night)
 			drawn = !cv.dirty.empty()
 		}

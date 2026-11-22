@@ -41,24 +41,18 @@ func (b *box) pollChargePage(c *busCtx) {
 	if okSt {
 		ci.state = int(st)
 	}
+	// getAD 返回的 double[] 不是纯数值数组，前几位可能是标志位，快充时后面还会混入峰值/限值。
+	// 实测形态（2026-11-22 快充，rawCur/rawVolt 已落盘）：
+	//   电压 慢充 [1, 210.8] / 快充 [2, 2, 409.1]
+	//   电流 慢充 [29.5, 29.5] / 快充 [2, 2, 71.8, 471.8, 471.8]
+	// 末尾的 471.8 是峰值电流，取 max 会把 71.8A 读成 471.8A、功率虚高到 193kW。
+	// 慢充数组形态简单（值重复两次），取 max 恰好正确，所以之前没暴露。
+	// 统一改为：跳过标志位，取第一个真实值。
 	if okCur {
-		// 电流实测返回 [29.5, 29.5]，取最大值兼容 [flag, 值] / [值] 两种形态
-		for _, v := range cur {
-			if v > ci.cur {
-				ci.cur = v
-			}
-		}
+		ci.cur = firstRealValue(cur, 2)
 	}
-	// 电压**不能取 [0]**：实测 get_host_echarge_voltage 返回 [1, 210.8]，
-	// 第一个元素是标志位，真正的电压在第二个。以前取 vol[0]=1 被 chgVoltMin 挡掉，
-	// 结果电压和功率整列都显示 "--"（2026-11-18 真车充电时才发现）。
-	// 这里取数组里最大的合理值，[220] 和 [1, 210.8] 两种形态都能拿到。
 	if okVol {
-		for _, v := range vol {
-			if v > chgVoltMin && v > ci.volt {
-				ci.volt = v
-			}
-		}
+		ci.volt = firstRealValue(vol, chgVoltMin)
 	}
 	if okPow && len(pow) > 0 && pow[0] > 0 {
 		ci.power = pow[0]
@@ -138,6 +132,19 @@ func (b *box) pollChargePage(c *busCtx) {
 	b.mu.Lock()
 	prev := b.s.chg
 	if ci.ok {
+		// 占位值清理必须在峰值统计/状态推导之前：
+		// DBus 在未充电、尤其"插枪等待桩启动"时，echarge_* 会返回固定占位
+		// volt=100 / cur=100 / power=10。照单全收会把峰值写成 100A，
+		// 并让 deriveState 的 cur>=0.5 误判为"充电中"，界面显示假的 100V/100A/10kW。
+		// 原条件要求 gun/mcu/state 全 0，但插枪等桩时 gun=1，条件不成立。
+		// 改为按数值特征识别；只要没在真正充电就清掉这组占位读数。
+		placeholder := ci.volt >= 99 && ci.volt <= 101 &&
+			ci.cur >= 99 && ci.cur <= 101 && ci.power >= 9 && ci.power <= 11
+		idleAllZero := ci.gun == 0 && ci.mcu == 0 && ci.state == 0
+		if idleAllZero || (!ci.on && placeholder) {
+			ci.volt, ci.cur, ci.power = 0, 0, 0
+			ci.leftMin, ci.durMin = 0, 0
+		}
 		// 会话峰值：新会话（刚插枪开始充）清零，充电中持续跟踪；
 		// 不在充电时保留上一轮的峰值与结论，让"充电完成"页还能显示桩类型。
 		switch {
@@ -162,14 +169,17 @@ func (b *box) pollChargePage(c *busCtx) {
 		}
 		ci.pile = derivePile(ci)
 		ci.st = deriveState(ci, prev.st)
+		// 完成态尚未拔枪时也要继续整屏接管：否则视频播放器退出、常规数据
+		// 直接叠在原厂完成页上，既没有动画也没屏蔽数据。
+		// 拔枪（gun 归 0）或完全空闲即退出接管。
+		pluggedNow := ci.gun >= int(gunPlugged) || ci.portL != 0 || ci.portR != 0
+		ci.pageOn = ci.on || (ci.st == chgDone && pluggedNow)
 		ci.warns = deriveChargeWarns(ci, ci.st, tm)
-		// 未插枪、MCU 未充电、状态机也空闲：DBus 的 echarge_* 仍会返回占位值
-		// （实测 volt=100 / cur=100 / power=10），照单全收会显示成
-		// 「100V / 100A / 10kW / 直流快充 / 一条警示」，与"根本没在充电"的事实矛盾。
-		// 这里统一清零，保证原始数据与界面都回到真实状态。
-		if ci.gun == 0 && ci.mcu == 0 && ci.state == 0 {
-			ci.volt, ci.cur, ci.power = 0, 0, 0
-			ci.leftMin, ci.durMin, ci.sessSec = 0, 0, 0
+		// 完全空闲（未插枪/未充电/状态机空闲）时连峰值和桩类型一起清，
+		// 让下次插枪从干净状态开始；插枪等桩的情况上面已清瞬时占位读数，
+		// 但保留上一轮峰值，供"充电完成"页继续显示桩类型。
+		if idleAllZero {
+			ci.sessSec = 0
 			ci.maxPower, ci.maxCur, ci.maxVolt = 0, 0, 0
 			ci.pile = pileUnknown
 			ci.warns = nil
@@ -181,6 +191,6 @@ func (b *box) pollChargePage(c *busCtx) {
 
 	// 原始值落盘：实车充一次电就能把 mcu/gun/state 的枚举对齐
 	if pageOn {
-		dumpChgRaw(ci, tm)
+		dumpChgRaw(ci, tm, vol, cur, pow)
 	}
 }

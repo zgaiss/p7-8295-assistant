@@ -95,7 +95,18 @@ func intOr(c *busCtx, m string) int {
 	return 0
 }
 
-// adOr 读一个 double[] 属性的首元素，读不到记 0
+// firstRealValue 从 DBus double[] 里取第一个真实值：跳过 <= min 的标志位，
+// 也不取 max（快充数组后面会混入峰值/限值，取 max 会把实时值读成峰值）。
+// 慢充 [29.5,29.5] / 快充 [2,2,71.8,471.8,471.8] 都能拿到正确值。
+func firstRealValue(a []float64, min float64) float64 {
+	for _, v := range a {
+		if v > min {
+			return v
+		}
+	}
+	return 0
+}
+
 func adOr(c *busCtx, m string) float64 {
 	if a, ok := c.getAD(m); ok && len(a) > 0 {
 		return a[0]
@@ -163,10 +174,15 @@ func deriveState(ci chargeInfo, prev chgState) chgState {
 	if ci.batFault != 0 || ci.hvCutoff != 0 || ci.portLFault != 0 || ci.portRFault != 0 {
 		return chgError
 	}
+	// 完成态必须在电流判定之前：实车充满后 mcu=3，桩仍有 3A 左右的尾电流，
+	// 若先看电流会被误判成"充电中"，完成页就永远出不来（2026-11-23 实车复现）。
+	if ci.mcu == int(mcuDone) {
+		return chgDone
+	}
 	if ci.cur >= chgCurMinA {
 		return chgRunning
 	}
-	if ci.mcu == int(mcuDone) || (prev == chgRunning && ci.soc >= 95) {
+	if prev == chgRunning && ci.soc >= 95 {
 		return chgDone
 	}
 	if ci.state == int(mcuFault) || ci.mcu == int(mcuFault) {
@@ -446,8 +462,14 @@ func paintChargeBlock(cv *canvas, st chgState, ch chargeInfo, cfgTagShow bool, v
 	cv.drawText(stateTitle(st, ch), x0, y(110), 44, chgTitleCol, 1, false)
 
 	// 公里数 96px + 单位 km（偏移 +14）
+	// 完成态对齐原厂：只显示电量（SOC），不再显示续航——原厂完成页不报续航，
+	// 而且桩在充满后 often 把 rangeKm 刷新成不确定值。
 	val, unit := "", ""
-	if ch.rangeKm > 0 {
+	if st == chgDone {
+		if ch.soc > 0 {
+			val, unit = fmt.Sprintf("%d", ch.soc), "%"
+		}
+	} else if ch.rangeKm > 0 {
 		val, unit = fmt.Sprintf("%d", ch.rangeKm), "km"
 	} else if ch.soc > 0 {
 		val, unit = fmt.Sprintf("%d", ch.soc), "%"
@@ -459,13 +481,21 @@ func paintChargeBlock(cv *canvas, st chgState, ch chargeInfo, cfgTagShow bool, v
 		cv.drawText("--", x0, y(229), 96, chgDim, 1, true)
 	}
 
-	// 标签行 30px
-	cv.drawText("剩余时间", x0, y(312), 30, chgDim, 1, false)
+	// 标签行 30px。完成态原厂显示"已充时长"，不是"剩余时间"。
+	leftLabel := "剩余时间"
+	if st == chgDone {
+		leftLabel = "已充时长"
+	}
+	cv.drawText(leftLabel, x0, y(312), 30, chgDim, 1, false)
 	cv.drawText("电量", xCol2, y(312), 30, chgDim, 1, false)
 
 	// 数值行 56px（min 偏移 +10、% 偏移 +8）
-	if ch.leftMin > 0 {
-		end := cv.drawText(fmt.Sprintf("%d", ch.leftMin), x0, y(382), 56, chgWhite, 1, true)
+	leftVal := ch.leftMin
+	if st == chgDone {
+		leftVal = ch.durMin // 完成态显示本次已充时长
+	}
+	if leftVal > 0 {
+		end := cv.drawText(fmt.Sprintf("%d", leftVal), x0, y(382), 56, chgWhite, 1, true)
 		cv.drawText("min", end+10, y(382), 30, chgWhite, 1, false)
 	} else {
 		cv.drawText("--", x0, y(382), 56, chgDim, 1, true)
@@ -487,9 +517,10 @@ func paintChargeBlock(cv *canvas, st chgState, ch chargeInfo, cfgTagShow bool, v
 		v, u string
 		ok   bool
 	}{
-		{70, fmt.Sprintf("%.1f", ch.power), "kW", ch.power > 0},
-		{260, fmt.Sprintf("%.1f", ch.volt), "V", ch.volt > 0},
-		{450, fmt.Sprintf("%.1f", ch.cur), "A", ch.cur > 0},
+		// 完成态桩仍有尾电流（实车 3A）和残留电压，原厂完成页不显示这些实时量。
+		{70, fmt.Sprintf("%.1f", ch.power), "kW", st != chgDone && ch.power > 0},
+		{260, fmt.Sprintf("%.1f", ch.volt), "V", st != chgDone && ch.volt > 0},
+		{450, fmt.Sprintf("%.1f", ch.cur), "A", st != chgDone && ch.cur > 0},
 	}
 	for _, it := range items {
 		txt, col := it.v, chgWhite
