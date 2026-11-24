@@ -110,8 +110,11 @@ public class CameraManager {
  public int opens, mode=3; public boolean opened, ignoreWrites, ignorePreOpen=true;
  public final List<Integer> writes=new ArrayList<Integer>();
  public final List<Open> requests=new ArrayList<Open>();
+ public Runnable onRead, onCharacteristics;
+ public int readMode(){int value=mode;Runnable hook=onRead;onRead=null;if(hook!=null)hook.run();return value;}
  public String[] getCameraIdList(){return new String[]{"0","1"};}
- public CameraCharacteristics getCameraCharacteristics(String id){return new CameraCharacteristics();}
+ public CameraCharacteristics getCameraCharacteristics(String id){
+  Runnable hook=onCharacteristics;onCharacteristics=null;if(hook!=null)hook.run();return new CameraCharacteristics();}
  public void openCamera(String id,CameraDevice.StateCallback cb,Handler h){
   opens++;requests.add(new Open(cb,h));
  }
@@ -149,7 +152,7 @@ public class ImageReader {
     "com/xiaopeng/clusterassist/AvmMode.java": '''package com.xiaopeng.clusterassist;
 import android.hardware.camera2.CameraManager;
 final class AvmMode {
- static int current(CameraManager m){return m.mode;}
+ static int current(CameraManager m){return m.readMode();}
  static boolean set(CameraManager m,int mode){m.writes.add(mode);
   if(!m.ignoreWrites&&(!m.ignorePreOpen||m.opened))m.mode=mode;
   return true;

@@ -184,17 +184,10 @@ public class PushService extends Service {
             prefsReloadAt = reloadNow;
             prefs = Prefs.load(this);
         }
-        if (!prefs.master || !prefs.mirror) {
-            // Disabling may coincide with native reverse takeover; do not restore old mode.
-            MirrorSource.yieldToNative();
-            stopMirror(true, false);
-            mirrorFailures = 0;
-            mirrorRetrySide = 0;
-            return;
-        }
+        boolean enabled = prefs.master && prefs.mirror;
         long nowMs = System.currentTimeMillis();
         // XUI 订阅失败（车机没起来 / 服务还没就绪）时 5 秒重试一次，不影响 200ms 主轮询节拍
-        if (!XuiLight.isReady() && nowMs - xuiRetryAt >= 5000) {
+        if (enabled && !XuiLight.isReady() && nowMs - xuiRetryAt >= 5000) {
             xuiRetryAt = nowMs;
             XuiLight.start();
         }
@@ -202,17 +195,22 @@ public class PushService extends Service {
         // 信号源：本固件上 CarProperty 被 CarPermissionManager 拦死，只有 XUI 可用；
         // 保留 CarProperty 作为兜底（老固件/其他车型）。
         boolean xui = XuiLight.isReady();
-        Boolean l;
-        Boolean r;
         Integer gear;
         if (xui) {
-            l = XuiLight.isLeftOn();
-            r = XuiLight.isRightOn();
-            gear = XuiLight.gear() >= 0 ? Integer.valueOf(XuiLight.gear()) : null;
+            int sampledGear = XuiLight.gear();
+            gear = sampledGear >= 0 ? Integer.valueOf(sampledGear) : null;
         } else {
-            l = CarBridge.readTurnLeft();
-            r = CarBridge.readTurnRight();
             gear = CarBridge.readGear();
+        }
+        int reverseGear = xui ? XuiLight.GEAR_REVERSE : CarBridge.GEAR_REVERSE;
+        int side = MirrorTriggerGate.decide(enabled, null, null, gear, reverseGear);
+        Boolean l = null;
+        Boolean r = null;
+        if (side == MirrorTriggerGate.WAIT) {
+            // Never delay a known reverse/unknown-gear yield behind lamp IPC.
+            l = xui ? XuiLight.isLeftOn() : CarBridge.readTurnLeft();
+            r = xui ? XuiLight.isRightOn() : CarBridge.readTurnRight();
+            side = MirrorTriggerGate.decide(enabled, l, r, gear, reverseGear);
         }
 
         // 诊断心跳（3 秒一次）：读不到（null）和读到"灭"（false）行为完全不同——前者永不触发，
@@ -226,28 +224,19 @@ public class PushService extends Service {
                     + " err=" + (xui ? XuiLight.lastError() : CarBridge.lastError()));
         }
 
-        // A known reverse signal overrides even unknown turn-light values.
-        boolean rev = xui ? XuiLight.isReverse() : (gear != null && gear == CarBridge.GEAR_REVERSE);
-        if (rev) {
-            MirrorSource.yieldToNative(); // Also cancels restores queued by a previously detached source.
-            stopMirror(false, false); // Native reverse view owns the mode now.
+        // Gear is checked even when disabled: reverse must cancel a detached owner's
+        // queued restore. Unknown gear also yields rather than guessing non-reverse.
+        if (side == MirrorTriggerGate.YIELD) {
+            MirrorSource.yieldToNative();
+            stopMirror(!enabled, false);
             mirrorRetrySide = 0;
             mirrorFailures = 0;
             return;
         }
-        if (l == null || r == null) return;
-        int side = 0;
-        // 双闪（两边同时亮）不触发，与原厂「打灯联动」语义一致
-        if (!rev && l != null && r != null && l && r) {
-            side = 0;
-        } else if (!rev && l != null && l) {
-            side = 1;
-        } else if (!rev && r != null && r) {
-            side = 2;
-        }
-
-        if (side == 0) {
-            stopMirror(false);
+        if (side == MirrorTriggerGate.WAIT) return;
+        if (side == MirrorTriggerGate.STOP) {
+            // A known non-reverse end (including disable) restores the saved mode.
+            stopMirror(!enabled, true);
             mirrorRetrySide = 0;
             mirrorFailures = 0;
             return;

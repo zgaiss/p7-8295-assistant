@@ -287,7 +287,67 @@ public final class MirrorCameraLifecycleTest {
         cases++;
     }
 
+    private static void unknownEntryStateNeverOpens() {
+        CameraManager m = new CameraManager();
+        m.mode = -1;
+        MirrorSource s = start(m, new MirrorPush(), true);
+        check(s.isStopped(), "unknown entry state must fail closed");
+        check(m.opens == 0 && m.writes.isEmpty(), "unknown entry state opened camera or wrote fish-eye");
+        check(!s.lastError().isEmpty(), "unknown entry state needs a diagnostic");
+        s.stop();
+        Handler.ready();
+        Handler.advance(4000);
+        check(Handler.pending() == 0, "unknown entry leaked delayed tasks");
+        cases++;
+    }
+
+    private static void exactEntryStateRestored() {
+        for (int original : new int[] {0, 8, 16, 21}) {
+            CameraManager m = new CameraManager();
+            m.mode = original;
+            MirrorSource s = start(m, new MirrorPush(), true);
+            check(m.opens == 1, "known state did not open camera");
+            m.requests.get(0).opened();
+            Handler.ready();
+            check(m.mode == 8, "known state did not enter fish-eye");
+            s.stop();
+            Handler.ready();
+            check(m.mode == original, "turn end lost original mode " + original);
+            int writes = m.writes.size();
+            finish(s, m, 0);
+            check(m.mode == original && m.writes.size() == writes, "repeated close changed original state");
+            cases++;
+        }
+    }
+
+    private static void nativeYieldDuringSynchronousQuery() {
+        for (boolean duringSnapshot : new boolean[] {true, false}) {
+            final CameraManager m = new CameraManager();
+            final MirrorSource s = new MirrorSource(new Context(m), 0, 1, true, new MirrorPush());
+            Runnable takeover = new Runnable() {
+                public void run() {
+                    m.mode = 16; // Native reverse view takes control while the query is returning.
+                    MirrorSource.yieldToNative();
+                    s.stop(false);
+                }
+            };
+            if (duringSnapshot) m.onRead = takeover;
+            else m.onCharacteristics = takeover;
+            s.start();
+            Handler.ready();
+            check(s.isStopped() && m.opens == 0, "cancelled query continued into camera open");
+            check(m.mode == 16, "cancelled query overwrote native mode");
+            check(m.writes.size() == (duringSnapshot ? 0 : 1), "new AVM write after native yield");
+            Handler.advance(4000);
+            check(Handler.pending() == 0, "cancelled synchronous query leaked owner tasks");
+            cases++;
+        }
+    }
+
     public static void main(String[] args) {
+        nativeYieldDuringSynchronousQuery();
+        unknownEntryStateNeverOpens();
+        exactEntryStateRestored();
         stopBeforeOpenTask();
         lateOpened();
         lateConfigured();
