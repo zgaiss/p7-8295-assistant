@@ -30,7 +30,7 @@ import java.nio.ByteBuffer;
  * 顺便算 565。这样不需要额外的缩放库，也不需要中间 Bitmap。</p>
  *
  * <p>线程：Camera2 回调在自建 HandlerThread 上，转换完调
- * {@link MirrorPush#submit} 入队就返回，绝不碰网络、不阻塞相机。</p>
+ * {@link MirrorFrameSink#submit} 分发到仪表及可选车机悬浮窗后就返回，不执行网络或 UI 操作。</p>
  */
 public final class MirrorSource {
     private static final String TAG = "P7MirrorSrc";
@@ -120,7 +120,7 @@ public final class MirrorSource {
     private final int side;
     /** Request quad mode and gate frames on parameter readback; otherwise pass the manual stream through. */
     private final boolean quad;
-    private final MirrorPush push;
+    private final MirrorFrameSink push;
 
     // One process-wide owner survives stop() to drain late HAL callbacks. Never quit it
     // while an asynchronous open/close can still deliver a CameraDevice.
@@ -161,7 +161,7 @@ public final class MirrorSource {
     private volatile boolean closed;
     private volatile String lastError = "";
 
-    public MirrorSource(Context ctx, int cameraId, int side, boolean quad, MirrorPush push) {
+    public MirrorSource(Context ctx, int cameraId, int side, boolean quad, MirrorFrameSink push) {
         this.ctx = ctx.getApplicationContext();
         this.cameraId = cameraId;
         this.side = side;

@@ -73,6 +73,7 @@ public class Prefs {
 
     // 打灯影像（车机 → 仪表 :9002）
     public boolean mirror = false;     // 默认关：会盖住半屏，必须显式打开
+    public boolean mirrorOverlay = false; // 附加车机悬浮输出；不改变 mirror / video.enable 语义
     public int mirrorCamL = 0;         // 左灯用的相机 id（实车按需调整）
     public int mirrorCamR = 1;         // 右灯用的相机 id
     public int mirrorPort = 9002;      // 仪表端影像端口（与 config.json 的 video.port 一致）
@@ -136,6 +137,7 @@ public class Prefs {
         p.pass = sp.getString("pass", "");
         p.bridge = sp.getBoolean("bridge", true);
         p.mirror = sp.getBoolean("mirror", false);
+        p.mirrorOverlay = sp.getBoolean("mirrorOverlay", false);
         p.mirrorCamL = sp.getInt("mirrorCamL", 0);
         p.mirrorCamR = sp.getInt("mirrorCamR", 1);
         p.mirrorPort = sp.getInt("mirrorPort", 9002);
@@ -195,6 +197,7 @@ public class Prefs {
         e.putString("pass", pass);
         e.putBoolean("bridge", bridge);
         e.putBoolean("mirror", mirror);
+        e.putBoolean("mirrorOverlay", mirrorOverlay);
         e.putInt("mirrorCamL", mirrorCamL);
         e.putInt("mirrorCamR", mirrorCamR);
         e.putInt("mirrorPort", mirrorPort);
@@ -222,6 +225,7 @@ public class Prefs {
         p.extTtl = extTtl;
         p.host = host; p.port = port; p.user = user; p.pass = pass; p.bridge = bridge;
         p.mirror = mirror; p.mirrorCamL = mirrorCamL; p.mirrorCamR = mirrorCamR; p.mirrorPort = mirrorPort;
+        p.mirrorOverlay = mirrorOverlay;
         p.mirrorAvm = mirrorAvm;
         p.quadCropEnable = quadCropEnable;
         p.quadZoomL = quadZoomL; p.quadPanXL = quadPanXL; p.quadPanYL = quadPanYL;

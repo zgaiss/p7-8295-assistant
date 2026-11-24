@@ -85,6 +85,23 @@ public final class MirrorTriggerGateTest {
         check(h.starts == 1, "production mirrorStep: CarProperty 2 is not reverse");
         h = harness(4, null, false); h.step();
         check(h.starts == 0 && h.stops == 0, "production mirrorStep: unknown lamps wait");
+        h = harness(4, null, false); Prefs.saved.mirrorOverlay = true; h.step();
+        check(h.mirrorOverlay.enabled && h.starts == 0,
+                "production mirrorStep: optional sink preference updates even with unknown lamps");
+        Prefs.saved.mirrorOverlay = false; h.step();
+        check(!h.mirrorOverlay.enabled && h.starts == 0,
+                "production mirrorStep: disable preview while waiting, no camera reopen");
+        h = harness(4, null, false); h.cameraGranted = false; h.step();
+        check(h.stops == 1 && h.starts == 0 && h.restore,
+                "production mirrorStep: revoked camera stops even when lamp data unknown");
+        h = harness(4, true, false); h.cameraGranted = false; h.step();
+        check(h.stops == 1 && h.starts == 0, "camera revocation cannot trigger a retry/open");
+        h = harness(2, null, null); h.cameraGranted = false; h.step();
+        check(!h.restore && h.mirrorOverlay.changes == 0,
+                "reverse yields before optional preview permission/settings work");
+        h = harness(4, null, false); h.permissionThrows = true; h.step();
+        check(h.stops == 1 && h.starts == 0,
+                "permission API failure stops capture even with unknown lamps");
         System.out.println("PASS: " + checks + " trigger-policy and extracted production mirrorStep checks");
     }
 }

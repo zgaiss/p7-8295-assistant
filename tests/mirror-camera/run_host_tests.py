@@ -160,7 +160,7 @@ final class AvmMode {
  static String lastError(){return "fake AVM mode";}
 }''',
     "com/xiaopeng/clusterassist/MirrorPush.java": '''package com.xiaopeng.clusterassist;
-public class MirrorPush { public static final int W=640,H=360; public int submits;
+public class MirrorPush implements MirrorFrameSink { public static final int W=640,H=360; public int submits;
  public void submit(byte[] b,int side){submits++;} }''',
     "com/xiaopeng/clusterassist/Prefs.java": '''package com.xiaopeng.clusterassist;
 public class Prefs { public boolean quadCropEnable=true; public float quadZoomL=2,quadZoomR=2;
@@ -195,6 +195,7 @@ def main():
             tool("javac"), "-encoding", "UTF-8", "-source", "8", "-target", "8",
             "-Xlint:-options", "-d", str(output),
             *fake_files, str(real / "MirrorSource.java"), str(real / "MirrorAvmSession.java"),
+            str(real / "MirrorFrameSink.java"),
             str(ROOT / "tests/mirror-camera/MirrorCameraLifecycleTest.java"),
         ], check=True)
         subprocess.run([

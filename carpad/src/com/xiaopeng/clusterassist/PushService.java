@@ -153,6 +153,8 @@ public class PushService extends Service {
     private static final int MIRROR_POLL_MS = 200;
     private MirrorPush mirrorPush;
     private MirrorSource mirrorSrc;
+    private MirrorFrameFanout mirrorFrames;
+    private MirrorOverlay mirrorOverlay;
     private int mirrorSide;   // 0=无 1=左 2=右
     private boolean mirrorPermWarned;
     private long mirrorLogAt;
@@ -233,7 +235,6 @@ public class PushService extends Service {
             mirrorFailures = 0;
             return;
         }
-        if (side == MirrorTriggerGate.WAIT) return;
         if (side == MirrorTriggerGate.STOP) {
             // A known non-reverse end (including disable) restores the saved mode.
             stopMirror(!enabled, true);
@@ -241,6 +242,13 @@ public class PushService extends Service {
             mirrorFailures = 0;
             return;
         }
+        // Revocation also stops a running capture when lamp data is temporarily unknown.
+        if (!mirrorCameraGranted()) {
+            stopMirror(false);
+            return;
+        }
+        if (mirrorOverlay != null) mirrorOverlay.setEnabled(prefs.mirrorOverlay);
+        if (side == MirrorTriggerGate.WAIT) return;
         if (mirrorRetrySide != side) {
             mirrorRetrySide = side;
             mirrorFailures = 0;
@@ -258,9 +266,17 @@ public class PushService extends Service {
         startMirror(side);
     }
 
+    private boolean mirrorCameraGranted() {
+        try {
+            return checkSelfPermission(android.Manifest.permission.CAMERA)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
     private void startMirror(int side) {
-        if (checkSelfPermission(android.Manifest.permission.CAMERA)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+        if (!mirrorCameraGranted()) {
             stopMirror(false);
             if (!mirrorPermWarned) {
                 mirrorPermWarned = true;
@@ -271,6 +287,10 @@ public class PushService extends Service {
         MirrorSource.applyFromPrefs(prefs);
         // AVM controls the composed stream, not separate left/right camera IDs.
         final int cam = prefs.mirrorAvm ? 0 : (side == 1 ? prefs.mirrorCamL : prefs.mirrorCamR);
+        if (mirrorFrames != null) mirrorFrames.close();
+        if (mirrorOverlay == null) mirrorOverlay = new MirrorOverlay(this);
+        mirrorOverlay.setEnabled(prefs.mirrorOverlay);
+        MirrorFrameSink localPreview = mirrorOverlay.begin(side);
         if (mirrorSrc != null) mirrorSrc.stop();
         if (mirrorPush == null) mirrorPush = new MirrorPush();
         if (!mirrorPush.isRunning()) mirrorPush.start(prefs.host, prefs.mirrorPort);
@@ -280,7 +300,8 @@ public class PushService extends Service {
         mirrorPermWarned = false;
         // Source owns command/open/readback/session/close in one serialized lifecycle.
         // A dispatch boolean or a fixed delay must never select a quad crop alone.
-        mirrorSrc = new MirrorSource(this, cam, side, prefs.mirrorAvm, mirrorPush);
+        mirrorFrames = new MirrorFrameFanout(localPreview, mirrorPush);
+        mirrorSrc = new MirrorSource(this, cam, side, prefs.mirrorAvm, mirrorFrames);
         mirrorSrc.start();
         Log.i("P7Mirror", "打灯 " + side + " camera=" + cam + " AVM=" + prefs.mirrorAvm);
     }
@@ -288,6 +309,11 @@ public class PushService extends Service {
     private void stopMirror(boolean closeSocket) { stopMirror(closeSocket, true); }
 
     private void stopMirror(boolean closeSocket, boolean restoreMode) {
+        if (mirrorFrames != null) {
+            mirrorFrames.close();
+            mirrorFrames = null;
+        }
+        if (mirrorOverlay != null) mirrorOverlay.hide();
         if (mirrorSrc != null) {
             mirrorSrc.stop(restoreMode);
             mirrorSrc = null;
@@ -725,6 +751,10 @@ public class PushService extends Service {
         if (handler != null) handler.removeCallbacks(mirrorTick);
         MirrorSource.yieldToNative();
         stopMirror(true, false);
+        if (mirrorOverlay != null) {
+            mirrorOverlay.destroy();
+            mirrorOverlay = null;
+        }
         if (deploy != null) deploy.reset();
         super.onDestroy();
     }
