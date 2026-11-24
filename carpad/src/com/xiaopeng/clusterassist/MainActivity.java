@@ -45,7 +45,10 @@ public class MainActivity extends Activity {
     private static final int REQ_MIRROR_CAMERA = 1001;
     private static final String CAMERA_DENIED = "mirrorCameraDenied";
     private final CameraPermissionState cameraPermission = new CameraPermissionState();
-    private AlertDialog cameraSettingsDialog;
+    private AlertDialog cameraSettingsDialog, overlaySettingsDialog;
+    private final CameraPermissionState overlayPermission = new CameraPermissionState();
+    private TextView tvCameraPermission, tvOverlayPermission;
+    private PillSwitch swMirrorOverlay;
     private boolean permissionActivityDestroyed;
 
     private Prefs prefs;
@@ -56,7 +59,8 @@ public class MainActivity extends Activity {
 
     private final List<TextView> chips = new ArrayList<>();
     private TextView navConn, navDisp, navLyric, navChg, navDebug, navLog, tvChgAnim, tvChgRaw, tvCastDbg, tvStatus, tvLog, tvDeploy, tvConnState, tvAdbAuth;
-    private ScrollView pageConn, pageDisp, pageLyric, pageDebug, pageChg;
+    private ScrollView pageConn, pageDisp, pageLyric, pageDebug, pageChg, pageMirror;
+    private TextView navMirror;
     private LinearLayout pageLog;
     private LyricPositionMap lyricMap;
     private TextView tvLyricPos, tvLyricPosState, tvLyricScale, tvTlDiag;
@@ -102,6 +106,11 @@ public class MainActivity extends Activity {
         boolean restoreMirror = prefs.mirror && !hasCameraPermission();
         if (restoreMirror) {
             prefs.mirror = false;
+            prefs.save(this);
+        }
+        // 重建不恢复任何待授权意图；无前置条件的附加输出必须回退。
+        if (prefs.mirrorOverlay && (!prefs.mirror || !hasOverlayPermission())) {
+            prefs.mirrorOverlay = false;
             prefs.save(this);
         }
         deploy = new Deploy(this, prefs);
@@ -154,8 +163,19 @@ public class MainActivity extends Activity {
 
     private void requestMirrorEnable() {
         if (!permissionActivityAlive()) return;
+        // 一次只允许一个权限事务持有设置返回意图，避免消费另一个设置页的返回。
+        overlayPermission.disable();
+        dismissOverlaySettingsDialog();
         if (swMirror != null) swMirror.setCheckedSilently(prefs.mirror);
         handleCameraAction(cameraPermission.enable(hasCameraPermission(), cameraPermanentlyDenied()));
+    }
+
+    private void requestCameraAuthorization() {
+        if (!permissionActivityAlive()) return;
+        overlayPermission.disable();
+        dismissOverlaySettingsDialog();
+        dismissCameraSettingsDialog();
+        handleCameraAction(cameraPermission.authorize(hasCameraPermission(), cameraPermanentlyDenied()));
     }
 
     private void applyMirrorEnabled(boolean enabled) {
@@ -167,7 +187,13 @@ public class MainActivity extends Activity {
             toast("相机权限未授予，打灯影像保持关闭");
         }
         prefs.mirror = enabled;
+        if (!enabled) {
+            overlayPermission.disable();
+            dismissOverlaySettingsDialog();
+            prefs.mirrorOverlay = false;
+        }
         prefs.save(this);
+        refreshPermissionStatus();
         if (swMirror != null) swMirror.setCheckedSilently(enabled);
         if (enabled && prefs.bridge && prefs.master) PushService.start(this);
         schedulePush(120, false);
@@ -179,6 +205,9 @@ public class MainActivity extends Activity {
             case ENABLE:
                 applyMirrorEnabled(true);
                 if (prefs.mirror) toast("打灯影像已开启");
+                break;
+            case GRANTED:
+                toast("相机已授权；授权操作不会开启打灯影像");
                 break;
             case REQUEST:
                 try {
@@ -192,12 +221,13 @@ public class MainActivity extends Activity {
                 showCameraSettingsDialog();
                 break;
             case DENIED:
-                if (swMirror != null) swMirror.setCheckedSilently(false);
-                toast("未授予相机权限，打灯影像保持关闭；可再次开启重试");
+                if (swMirror != null) swMirror.setCheckedSilently(prefs.mirror);
+                toast("未授予相机权限；可点击相机授权重试");
                 break;
             default:
                 break;
         }
+        refreshPermissionStatus();
     }
 
     private void showCameraSettingsDialog() {
@@ -206,7 +236,10 @@ public class MainActivity extends Activity {
         final int token = cameraPermission.settingsToken();
         cameraSettingsDialog = new AlertDialog.Builder(this)
                 .setTitle("需要相机权限")
-                .setMessage("相机权限已被拒绝且系统不再弹出授权框。请在本应用设置 → 权限中允许相机；授权返回后才会开启打灯影像。取消则保持关闭。")
+                .setMessage("相机权限已被拒绝且系统不再弹出授权框。请在本应用设置 → 权限中允许相机。"
+                        + (cameraPermission.enablesAfterGrant()
+                        ? "本次为开启影像：授权返回后才会开启；取消则保持关闭。"
+                        : "本次仅授权，返回不会开启打灯影像。"))
                 .setPositiveButton("前往应用设置", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int which) {
                         if (!permissionActivityAlive() || !cameraPermission.openSettings(token)) return;
@@ -239,6 +272,123 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean hasOverlayPermission() {
+        return Settings.canDrawOverlays(this);
+    }
+
+    private void refreshPermissionStatus() {
+        if (tvCameraPermission != null) {
+            boolean granted = hasCameraPermission();
+            tvCameraPermission.setText(granted ? "相机权限：已授权" : "相机权限：未授权（影像不可用）");
+            tvCameraPermission.setTextColor(granted ? ui.tagGreen : ui.tagWarn);
+        }
+        if (tvOverlayPermission != null) {
+            boolean granted = hasOverlayPermission();
+            tvOverlayPermission.setText(granted ? "悬浮窗权限：已授权（仅授权不会开启输出）"
+                    : "悬浮窗权限：未授权（不影响仪表输出）");
+            tvOverlayPermission.setTextColor(granted ? ui.tagGreen : ui.tagWarn);
+        }
+        if (swMirrorOverlay != null) swMirrorOverlay.setCheckedSilently(prefs.mirrorOverlay);
+    }
+
+    private void applyOverlayEnabled(boolean enabled) {
+        if (!permissionActivityAlive()) return;
+        // 两个权限事务互不代替：悬浮授权绝不开启总开关，也不代替相机授权。
+        prefs.mirrorOverlay = enabled && prefs.mirror && hasCameraPermission() && hasOverlayPermission();
+        prefs.save(this);
+        refreshPermissionStatus();
+        if (prefs.bridge && prefs.master) PushService.start(this);
+        schedulePush(120, false);
+    }
+
+    private void requestOverlay(boolean enable) {
+        if (!permissionActivityAlive()) return;
+        cameraPermission.disable();
+        dismissCameraSettingsDialog();
+        if (!enable) dismissOverlaySettingsDialog();
+        refreshPermissionStatus(); // 异步授权完成前开关不显示/持久化 true。
+        if (enable && !prefs.mirror) {
+            toast("请先开启「启用打灯影像」；悬浮窗不会自动打开总开关");
+            return;
+        }
+        handleOverlayAction(enable ? overlayPermission.enable(hasOverlayPermission(), true)
+                : overlayPermission.authorize(hasOverlayPermission(), true));
+    }
+
+    private void handleOverlayAction(CameraPermissionState.Action action) {
+        if (!permissionActivityAlive()) return;
+        switch (action) {
+            case ENABLE:
+                applyOverlayEnabled(true);
+                if (prefs.mirrorOverlay) toast("车机悬浮窗已开启");
+                break;
+            case GRANTED:
+                toast("悬浮窗已授权；授权操作不会开启输出");
+                break;
+            case SETTINGS:
+                showOverlaySettingsDialog();
+                break;
+            case DENIED:
+                toast("未授予悬浮窗权限，悬浮输出保持关闭");
+                break;
+            default:
+                break;
+        }
+        refreshPermissionStatus();
+    }
+
+    private void showOverlaySettingsDialog() {
+        dismissOverlaySettingsDialog();
+        final int token = overlayPermission.settingsToken();
+        overlaySettingsDialog = new AlertDialog.Builder(this)
+                .setTitle("需要悬浮窗权限")
+                .setMessage("请在系统设置中允许本应用显示在其他应用上层。"
+                        + (overlayPermission.enablesAfterGrant()
+                        ? "返回时会重新核验权限；仅总开关仍开启时启用车机悬浮窗。取消则保持关闭。"
+                        : "本次仅授权，返回不会开启打灯影像或悬浮输出。"))
+                .setPositiveButton("前往悬浮窗设置", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        if (!permissionActivityAlive() || !overlayPermission.openSettings(token)) return;
+                        try {
+                            startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    android.net.Uri.parse("package:" + getPackageName())));
+                        } catch (RuntimeException e) {
+                            overlayPermission.disable();
+                            toast("无法打开悬浮窗设置，请手动授权后重新开启");
+                        }
+                    }
+                })
+                .setNegativeButton("取消", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        overlayPermission.cancelSettings(token);
+                    }
+                })
+                .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                    @Override public void onCancel(DialogInterface dialog) {
+                        overlayPermission.cancelSettings(token);
+                    }
+                }).create();
+        overlaySettingsDialog.show();
+    }
+
+    private void dismissOverlaySettingsDialog() {
+        if (overlaySettingsDialog != null) {
+            overlaySettingsDialog.dismiss();
+            overlaySettingsDialog = null;
+        }
+    }
+
+    private void refreshOverlayPermission() {
+        boolean granted = hasOverlayPermission();
+        if (prefs.mirrorOverlay && (!granted || !prefs.mirror)) {
+            overlayPermission.disable();
+            applyOverlayEnabled(false);
+            toast("悬浮窗权限或总开关已关闭，悬浮输出已回退为关闭");
+        }
+        handleOverlayAction(overlayPermission.resumed(granted));
+        refreshPermissionStatus();
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -264,6 +414,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         cameraPermission.paused();
+        overlayPermission.paused();
         super.onPause();
     }
 
@@ -271,6 +422,11 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         if (prefs == null || !permissionActivityAlive()) return;
+        refreshCameraPermission();
+        refreshOverlayPermission();
+    }
+
+    private void refreshCameraPermission() {
         boolean granted = hasCameraPermission();
         // 设置中授权后清掉拒绝记忆：以后系统撤权时仍可先尝试标准授权框。
         if (granted) getSharedPreferences(Prefs.SP, MODE_PRIVATE).edit()
@@ -331,6 +487,8 @@ public class MainActivity extends Activity {
         side.addView(navChg);
         side.addView(navDebug);
         side.addView(navLog);
+        navMirror = navItem("打灯影像", 6);
+        side.addView(navMirror);
 
         LinearLayout master = new LinearLayout(this);
         master.setOrientation(LinearLayout.HORIZONTAL);
@@ -408,6 +566,8 @@ public class MainActivity extends Activity {
         content.addView(pageChg);
         content.addView(pageDebug);
         content.addView(pageLog);
+        pageMirror = scrollPage(buildMirrorPage());
+        content.addView(pageMirror);
         right.addView(content, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         root.addView(right, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
@@ -470,12 +630,12 @@ public class MainActivity extends Activity {
     }
 
     private void selectPage(int i) {
-        // 按索引直取：0连接 1显示 2调试 3日志 4歌词位置 5充电模式
-        View[] pages = {pageConn, pageDisp, pageDebug, pageLog, pageLyric, pageChg};
+        // 保留旧索引：0连接 1显示 2调试 3日志 4歌词位置 5充电模式；末尾新增6打灯影像。
+        View[] pages = {pageConn, pageDisp, pageDebug, pageLog, pageLyric, pageChg, pageMirror};
         for (int k = 0; k < pages.length; k++) {
             pages[k].setVisibility(k == i ? View.VISIBLE : View.GONE);
         }
-        TextView[] navs = {navConn, navDisp, navDebug, navLog, navLyric, navChg};
+        TextView[] navs = {navConn, navDisp, navDebug, navLog, navLyric, navChg, navMirror};
         for (int k = 0; k < navs.length; k++) {
             boolean on = k == i;
             navs[k].setTextColor(on ? ui.textTitle : ui.textNav);
@@ -486,6 +646,10 @@ public class MainActivity extends Activity {
         if (i == 3) refreshLog();
         if (i == 4) refreshLyricPosState();
         if (i == 5) refreshChargePageState();
+        if (i == 6) {
+            refreshCameraPermission();
+            refreshOverlayPermission();
+        }
     }
 
     // ---------------- 页 1：连接仪表 ----------------
@@ -667,6 +831,103 @@ public class MainActivity extends Activity {
         return p;
     }
 
+    // ---------------- 页 7：打灯影像（权限 + 仪表 / 悬浮输出 + 共用取景） ----------------
+    // 老页面的索引和远端 video.enable 保持不变。
+    private LinearLayout buildMirrorPage() {
+        LinearLayout p = pageRoot();
+        p.addView(ui.pageHeader("打灯影像", pageChip()));
+        p.addView(ui.group("权限（授权不等于启用影像）"));
+        tvCameraPermission = ui.hint("");
+        p.addView(tvCameraPermission);
+        p.addView(ui.buttonRow(ui.button("相机授权", true, new View.OnClickListener() {
+            @Override public void onClick(View v) { requestCameraAuthorization(); }
+        })));
+        tvOverlayPermission = ui.hint("");
+        p.addView(tvOverlayPermission);
+        p.addView(ui.buttonRow(ui.button("悬浮窗授权", false, new View.OnClickListener() {
+            @Override public void onClick(View v) { requestOverlay(false); }
+        })));
+        p.addView(ui.hint("相机用于采集影像；悬浮窗权限仅用于车机屏附加输出。两项授权相互独立，单独授权均不会打开总开关。"));
+
+        p.addView(ui.group("影像输出"));
+        // 授权异步完成前不得复用 toggle() 的无条件 save/push。
+        LinearLayout mirror = ui.toggleItem("启用打灯影像", "总开关",
+                "打左/右转向灯时推送该侧画面到仪表半屏（960×540），松灯约 1 秒撤区。首次开启需相机权限。\n"
+                        + "倒挡、未知挡位优先让位，不采集/显示；双闪不触发。需要仪表端 2.14.0+。",
+                prefs.mirror, new PillSwitch.OnChange() {
+                    @Override public void onChanged(PillSwitch sw, boolean checked) {
+                        if (syncing || !permissionActivityAlive()) return;
+                        if (checked) {
+                            requestMirrorEnable();
+                        } else {
+                            cameraPermission.disable();
+                            dismissCameraSettingsDialog();
+                            applyMirrorEnabled(false);
+                        }
+                    }
+                });
+        swMirror = (PillSwitch) mirror.getTag();
+        p.addView(mirror);
+        LinearLayout overlay = ui.toggleItem("车机悬浮窗", "附加输出",
+                "需先开启上方总开关并授予悬浮窗权限；不自动开启总开关。关闭总开关会同时关闭此项。\n"
+                        + "与仪表共享同一相机流、同一左右视野和取景设置，不另开相机；倒挡和未知挡位均让位原厂影像。",
+                prefs.mirrorOverlay, new PillSwitch.OnChange() {
+                    @Override public void onChanged(PillSwitch sw, boolean checked) {
+                        if (syncing || !permissionActivityAlive()) return;
+                        if (checked) requestOverlay(true);
+                        else {
+                            overlayPermission.disable();
+                            dismissOverlaySettingsDialog();
+                            applyOverlayEnabled(false);
+                        }
+                    }
+                });
+        swMirrorOverlay = (PillSwitch) overlay.getTag();
+        p.addView(overlay);
+        p.addView(ui.hint("16:9 侧边窗，左灯在左、右灯在右；不接收触摸、不抢焦点，需在本页关闭；断流 800ms 自动撤窗。\n"
+                + "悬浮窗只是附加显示，不替代仪表输出。授权取消、未授权返回或权限被系统收回时保持/回退为关闭，不循环弹窗。请勿依赖辅助影像判断行车安全。"));
+        p.addView(ui.hint("双击悬浮窗可在任何挡位进入编辑：拖动画面移动、拖右下角缩放，双击或点左上角“完成”退出；左右位置分别保存，大小两边共用。"
+                + "行驶中请勿编辑，避免遮挡或误触。"));
+        p.addView(ui.buttonRow(ui.button("重置悬浮窗大小和位置", false, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                prefs.ovW = -1;
+                prefs.ovLeftX = prefs.ovLeftY = -1;
+                prefs.ovRightX = prefs.ovRightY = -1;
+                prefs.save(MainActivity.this);
+                schedulePush(120, false);
+                toast("已重置悬浮窗大小和位置");
+            }
+        })));
+        p.addView(ui.group("相机与视角（仪表 / 悬浮窗共用）"));
+        p.addView(toggle("鱼眼视角", "四路鱼眼",
+                "开：请求四路鱼眼并检查参数模式，未确认则不推流；松灯有条件尝试还原，倒挡优先让位。\n"
+                        + "关：不切换视角，原样显示下方手动相机流。首次使用须驻车确认真实左右视野。",
+                prefs.mirrorAvm,
+                new Setter() { @Override public void set(boolean v) { prefs.mirrorAvm = v; } }));
+        LinearLayout mcL = ui.stepperItem("影像源 · 左灯相机", "id " + prefs.mirrorCamL,
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpMirrorCam(true, -1); }
+                },
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpMirrorCam(true, 1); }
+                });
+        tvMirrorCamL = (TextView) mcL.getTag();
+        p.addView(mcL);
+        LinearLayout mcR = ui.stepperItem("影像源 · 右灯相机", "id " + prefs.mirrorCamR,
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpMirrorCam(false, -1); }
+                },
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { bumpMirrorCam(false, 1); }
+                });
+        tvMirrorCamR = (TextView) mcR.getTag();
+        p.addView(mcR);
+        p.addView(ui.hint("仅关闭鱼眼视角时使用手动 id（0~7）；开启鱼眼时左右灯共用 AVM 合成流。请驻车标定，勿行驶中调试"));
+        buildQuadCropUi(p);
+        refreshPermissionStatus();
+        return p;
+    }
+
     // ---------------- 页 2：显示内容（投放控制 + 分区开关，对齐原版 v1.1.0） ----------------
 
     private LinearLayout buildDisplayPage() {
@@ -724,59 +985,6 @@ public class MainActivity extends Activity {
                 new Setter() { @Override public void set(boolean v) { prefs.tpmsHi = v; } });
         swTpmsHi = (PillSwitch) r6.getTag();
         p.addView(ui.pair(r3, r6));
-
-        // 打灯影像：把该侧相机画面推到仪表半屏（960×540）。默认关——它会盖住半屏。
-        p.addView(ui.group("打灯影像（推到仪表半屏）"));
-        // 授权是异步事务，不能复用 toggle() 的 Setter 后无条件 save/push。
-        LinearLayout r7 = ui.toggleItem("打灯影像", "960×540",
-                "打左/右转向灯时，把该侧相机画面推到仪表左/右半屏；松灯约 1 秒后自动撤区。\n"
-                        + "倒挡、双闪不触发。需要仪表端 2.14.0+；首次开启会请求相机权限。",
-                prefs.mirror, new PillSwitch.OnChange() {
-                    @Override public void onChanged(PillSwitch sw, boolean checked) {
-                        if (syncing || !permissionActivityAlive()) return;
-                        if (checked) {
-                            requestMirrorEnable();
-                        } else {
-                            cameraPermission.disable();
-                            dismissCameraSettingsDialog();
-                            applyMirrorEnabled(false);
-                        }
-                    }
-                });
-        swMirror = (PillSwitch) r7.getTag();
-        p.addView(r7);
-
-        // 视角来源：车机把 AVM 合成画面当一路相机暴露出来，默认是 360 俯视 + 前视。
-        // 打灯要看的是侧后方广角，所以默认切到四路鱼眼四宫格再裁对应象限。
-        LinearLayout r8 = toggle("鱼眼视角", "四路鱼眼",
-                "开：请求四路鱼眼并检查参数模式，未确认则不推流；松灯有条件尝试还原，倒挡优先让位。\n"
-                        + "关：不切换视角，原样显示下方手动相机流。首次使用须驻车确认真实左右视野。",
-                prefs.mirrorAvm,
-                new Setter() { @Override public void set(boolean v) { prefs.mirrorAvm = v; } });
-        p.addView(r8);
-
-        // 相机 id 是实车标定的（哪一路是左后/右后没有统一约定），所以给两个步进器现场调。
-        LinearLayout mcL = ui.stepperItem("影像源 · 左灯相机", "id " + prefs.mirrorCamL,
-                new View.OnClickListener() {
-                    @Override public void onClick(View v) { bumpMirrorCam(true, -1); }
-                },
-                new View.OnClickListener() {
-                    @Override public void onClick(View v) { bumpMirrorCam(true, 1); }
-                });
-        tvMirrorCamL = (TextView) mcL.getTag();
-        p.addView(mcL);
-        LinearLayout mcR = ui.stepperItem("影像源 · 右灯相机", "id " + prefs.mirrorCamR,
-                new View.OnClickListener() {
-                    @Override public void onClick(View v) { bumpMirrorCam(false, -1); }
-                },
-                new View.OnClickListener() {
-                    @Override public void onClick(View v) { bumpMirrorCam(false, 1); }
-                });
-        tvMirrorCamR = (TextView) mcR.getTag();
-        p.addView(mcR);
-        p.addView(ui.hint("仅关闭鱼眼视角时使用手动 id（0~7）；开启鱼眼时左右灯共用 AVM 合成流。请驻车标定，勿行驶中调试"));
-
-        buildQuadCropUi(p);
 
         // 底部中央区域：里程 / 时间 / 平均车速 / 平均能耗
         p.addView(ui.group("底部中央区域"));
@@ -2624,7 +2832,9 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         permissionActivityDestroyed = true;
         cameraPermission.destroy();
+        overlayPermission.destroy();
         dismissCameraSettingsDialog();
+        dismissOverlaySettingsDialog();
         super.onDestroy();
         // recreate() 换昼夜配色时，旧实例的循环任务必须停掉：
         // 否则 refreshAdbAuth / 连接自检还挂在旧对象上继续跑。

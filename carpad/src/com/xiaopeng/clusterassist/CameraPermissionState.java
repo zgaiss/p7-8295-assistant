@@ -1,11 +1,12 @@
 package com.xiaopeng.clusterassist;
 
-/** Android-free, fail-closed state for an explicit mirror enable gesture. */
+/** Android-free, fail-closed permission transaction; each instance owns one permission. */
 final class CameraPermissionState {
-    enum Action { NONE, ENABLE, REQUEST, DENIED, SETTINGS }
+    enum Action { NONE, ENABLE, GRANTED, REQUEST, DENIED, SETTINGS }
 
     private boolean alive = true;
     private boolean wanted;
+    private boolean enableAfterGrant;
     private boolean requesting;
     private boolean settingsPrompt;
     private boolean settingsReturn;
@@ -13,11 +14,25 @@ final class CameraPermissionState {
     private int generation;
 
     Action enable(boolean granted, boolean permanentlyDenied) {
+        return begin(granted, permanentlyDenied, true);
+    }
+
+    Action authorize(boolean granted, boolean permanentlyDenied) {
+        // An explicit grant-only gesture supersedes any older enable intention.
+        // disable() retains an in-flight OS request, so its callback is safely reused.
+        disable();
+        return begin(granted, permanentlyDenied, false);
+    }
+
+    private Action begin(boolean granted, boolean permanentlyDenied, boolean enable) {
         if (!alive) return Action.NONE;
+        // A second gesture must not silently change the purpose of an active OS request.
+        if (requesting && wanted) return Action.NONE;
         wanted = true;
+        enableAfterGrant = enable;
         if (granted) {
             disable();
-            return Action.ENABLE;
+            return enable ? Action.ENABLE : Action.GRANTED;
         }
         // An OFF/ON gesture while Android still owns the dialog reuses that request.
         if (requesting) return Action.NONE;
@@ -39,12 +54,14 @@ final class CameraPermissionState {
         if (!wanted) return Action.NONE;
         wanted = false;
         generation++;
-        if (granted) return Action.ENABLE;
+        if (granted) return enableAfterGrant ? Action.ENABLE : Action.GRANTED;
         settingsPrompt = permanentlyDenied;
         return permanentlyDenied ? Action.SETTINGS : Action.DENIED;
     }
 
     int settingsToken() { return generation; }
+
+    boolean enablesAfterGrant() { return enableAfterGrant; }
 
     boolean openSettings(int token) {
         if (!alive || !settingsPrompt || token != generation) return false;
@@ -65,9 +82,10 @@ final class CameraPermissionState {
 
     Action resumed(boolean granted) {
         if (!alive || !settingsReturn || !settingsPaused) return Action.NONE;
-        boolean enable = wanted && granted;
+        Action result = wanted && granted
+                ? (enableAfterGrant ? Action.ENABLE : Action.GRANTED) : Action.DENIED;
         disable();
-        return enable ? Action.ENABLE : Action.DENIED;
+        return result;
     }
 
     void disable() {

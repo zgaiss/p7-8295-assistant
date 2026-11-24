@@ -89,11 +89,11 @@ func TestMirHeaderRejects(t *testing.T) {
 
 func TestMirZoneGeometry(t *testing.T) {
 	l := mirZoneRect(mirSideLeft)
-	if l.x0 != 0 || l.x1 != 960 || l.y0 != 60 || l.y1 != 600 {
+	if l.x0 != 0 || l.x1 != 960 || l.y0 != 90 || l.y1 != 630 {
 		t.Fatalf("左区几何不符: %+v", l)
 	}
 	r := mirZoneRect(mirSideRight)
-	if r.x0 != frameW-960 || r.x1 != frameW || r.y0 != 60 || r.y1 != 600 {
+	if r.x0 != frameW-960 || r.x1 != frameW || r.y0 != 90 || r.y1 != 630 {
 		t.Fatalf("右区几何不符: %+v", r)
 	}
 	if !mirZoneRect(mirSideNone).empty() {
@@ -108,7 +108,7 @@ func TestMirZoneGeometry(t *testing.T) {
 		if z.y0 < 60 {
 			t.Fatalf("影像区顶到档位条: y0=%.0f", z.y0)
 		}
-		if z.y1 > 600 {
+		if z.y1 > 630 {
 			t.Fatalf("影像区压到底部状态条: y1=%.0f", z.y1)
 		}
 	}

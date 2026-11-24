@@ -151,6 +151,147 @@ public final class PermissionCameraStateTest {
         equal(false, s.openSettings(token));
         cases++;
 
-        System.out.println("PASS: " + cases + " camera permission state scenarios");
+        s = new CameraPermissionState();
+        equal(GRANTED, s.authorize(true, false)); // A grant-only button never opts in.
+        equal(NONE, s.resumed(true));
+        cases++;
+
+        s = new CameraPermissionState();
+        equal(REQUEST, s.authorize(false, false));
+        equal(NONE, s.enable(false, false)); // Do not upgrade an in-flight authorization.
+        equal(GRANTED, s.permissionResult(true, false));
+        equal(NONE, s.permissionResult(true, false));
+        cases++;
+
+        s = new CameraPermissionState();
+        equal(REQUEST, s.authorize(false, false));
+        equal(SETTINGS, s.permissionResult(false, true));
+        equal(false, s.enablesAfterGrant());
+        equal(true, s.openSettings(s.settingsToken()));
+        s.paused();
+        equal(GRANTED, s.resumed(true)); // Permanent denial round trip is also grant-only.
+        equal(NONE, s.resumed(true));
+        cases++;
+
+        s = new CameraPermissionState();
+        equal(SETTINGS, s.authorize(false, true)); // Overlay uses Settings, not runtime requests.
+        token = s.settingsToken();
+        s.cancelSettings(token);
+        equal(false, s.openSettings(token));
+        equal(NONE, s.resumed(true));
+        cases++;
+
+        s = new CameraPermissionState();
+        equal(SETTINGS, s.authorize(false, true));
+        equal(true, s.openSettings(s.settingsToken()));
+        equal(NONE, s.resumed(true)); // Must leave before a settings result is consumed.
+        s.paused();
+        equal(DENIED, s.resumed(false));
+        equal(NONE, s.resumed(true)); // Granting later does not resurrect this transaction.
+        cases++;
+
+        s = new CameraPermissionState();
+        equal(REQUEST, s.authorize(false, false));
+        s.disable();
+        equal(NONE, s.permissionResult(true, false));
+        equal(ENABLE, s.enable(true, false)); // Fresh enable gesture remains explicit.
+        cases++;
+
+        s = new CameraPermissionState();
+        equal(SETTINGS, s.enable(false, true));
+        equal(true, s.openSettings(s.settingsToken()));
+        s.paused();
+        s.disable(); // Closing the global switch cancels pending overlay enable too.
+        equal(NONE, s.resumed(true));
+        cases++;
+
+        s = new CameraPermissionState();
+        equal(SETTINGS, s.authorize(false, true));
+        token = s.settingsToken();
+        equal(SETTINGS, s.enable(false, true));
+        s.cancelSettings(token);
+        equal(false, s.openSettings(token));
+        equal(true, s.openSettings(s.settingsToken()));
+        s.paused();
+        equal(ENABLE, s.resumed(true)); // Only the latest explicit gesture owns Settings.
+        cases++;
+
+        CameraPermissionState camera = new CameraPermissionState();
+        CameraPermissionState overlay = new CameraPermissionState();
+        equal(REQUEST, camera.authorize(false, false));
+        equal(SETTINGS, overlay.authorize(false, true));
+        equal(true, overlay.openSettings(overlay.settingsToken()));
+        overlay.paused();
+        equal(GRANTED, camera.permissionResult(true, false));
+        equal(GRANTED, overlay.resumed(true)); // Neither permission grants an enable intent.
+        equal(NONE, camera.resumed(true));
+        equal(NONE, overlay.resumed(true));
+        cases++;
+
+        camera = requesting();
+        overlay = new CameraPermissionState();
+        equal(SETTINGS, overlay.enable(false, true));
+        equal(true, overlay.openSettings(overlay.settingsToken()));
+        overlay.paused();
+        camera.disable();
+        overlay.disable(); // MainActivity cancels both when global enable is switched off.
+        equal(NONE, camera.permissionResult(true, false));
+        equal(NONE, overlay.resumed(true));
+        cases++;
+
+        s = new CameraPermissionState();
+        equal(SETTINGS, s.authorize(false, true));
+        equal(true, s.openSettings(s.settingsToken()));
+        s.paused();
+        s.destroy();
+        recreated = new CameraPermissionState();
+        equal(NONE, s.resumed(true));
+        equal(NONE, recreated.resumed(true)); // Recreation never restores pending enable.
+        equal(NONE, s.authorize(true, false));
+        cases++;
+
+        s = requesting();
+        equal(NONE, s.authorize(false, false)); // Grant-only supersedes old pending enable.
+        equal(false, s.enablesAfterGrant());
+        equal(GRANTED, s.permissionResult(true, false)); // Reuse OS dialog, do not enable.
+        cases++;
+
+        s = new CameraPermissionState();
+        equal(SETTINGS, s.enable(false, true));
+        token = s.settingsToken();
+        equal(SETTINGS, s.authorize(false, true));
+        equal(false, s.openSettings(token)); // Previous enable dialog is stale.
+        equal(true, s.openSettings(s.settingsToken()));
+        s.paused();
+        equal(GRANTED, s.resumed(true));
+        cases++;
+
+        s = settings();
+        s.paused();
+        equal(GRANTED, s.authorize(true, false)); // Supersede an already-open Settings trip.
+        equal(NONE, s.resumed(true));
+        cases++;
+
+        camera = settings();
+        camera.paused();
+        overlay = new CameraPermissionState();
+        camera.disable(); // MainActivity enforces one permission transaction at a time.
+        equal(SETTINGS, overlay.authorize(false, true));
+        equal(true, overlay.openSettings(overlay.settingsToken()));
+        overlay.paused();
+        equal(NONE, camera.resumed(true)); // Overlay settings return cannot enable camera.
+        equal(GRANTED, overlay.resumed(true));
+        cases++;
+
+        overlay = settings();
+        overlay.paused();
+        camera = new CameraPermissionState();
+        overlay.disable(); // Switching to camera authorization invalidates overlay enable.
+        equal(REQUEST, camera.authorize(false, false));
+        equal(NONE, overlay.resumed(true));
+        equal(GRANTED, camera.permissionResult(true, false));
+        cases++;
+
+        System.out.println("PASS: " + cases + " camera/overlay permission state scenarios");
     }
 }

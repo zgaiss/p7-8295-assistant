@@ -45,7 +45,7 @@ import java.util.zip.Deflater;
  * </ul>
  * 队列深度 1：仪表本来就只显示最新一帧，积压只会让画面延迟越来越大。
  */
-public final class MirrorPush {
+public final class MirrorPush implements MirrorFrameSink {
     private static final String TAG = "P7MirrorPush";
 
     /**

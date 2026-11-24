@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.xiaopeng.clusterassist"
-    android:versionCode="134"
-    android:versionName="2.17.6">
+    package="com.xiaopeng.qa.camera"
+    android:versionCode="146"
+    android:versionName="2.19.2">
 
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="28" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- 转向灯/挡位：XUI contextinfo。prot=normal，装上即授予，不需要平台签名。
@@ -22,7 +23,7 @@
         android:theme="@style/AppTheme">
 
         <activity
-            android:name=".MainActivity"
+            android:name="com.xiaopeng.clusterassist.MainActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:screenOrientation="sensorLandscape"
@@ -34,11 +35,11 @@
         </activity>
 
         <service
-            android:name=".PushService"
+            android:name="com.xiaopeng.clusterassist.PushService"
             android:exported="false" />
 
         <service
-            android:name=".NavWatcher"
+            android:name="com.xiaopeng.clusterassist.NavWatcher"
             android:exported="false"
             android:label="@string/app_name"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
@@ -48,21 +49,21 @@
         </service>
 
         <receiver
-            android:name=".ProbeReceiver"
+            android:name="com.xiaopeng.clusterassist.ProbeReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="com.xiaopeng.clusterassist.PROBE" />
             </intent-filter>
         </receiver>
         <receiver
-            android:name=".AvmReceiver"
+            android:name="com.xiaopeng.clusterassist.AvmReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="com.xiaopeng.clusterassist.AVM" />
             </intent-filter>
         </receiver>
         <receiver
-            android:name=".BootReceiver"
+            android:name="com.xiaopeng.clusterassist.BootReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

@@ -284,7 +284,7 @@ public final class LocalAdb {
      * 通知监听组件。歌词和导航都靠它读 MediaSession。
      */
     public static final String NOTIF_COMP =
-            "com.xiaopeng.clusterassist/com.xiaopeng.clusterassist.NavWatcher";
+            "com.xiaopeng.qa.camera/com.xiaopeng.clusterassist.NavWatcher";
 
     /** 是否已拿到通知使用权 */
     public static boolean notifGranted(Context c) {

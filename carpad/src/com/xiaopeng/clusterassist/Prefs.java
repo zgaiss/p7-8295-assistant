@@ -73,6 +73,11 @@ public class Prefs {
 
     // 打灯影像（车机 → 仪表 :9002）
     public boolean mirror = false;     // 默认关：会盖住半屏，必须显式打开
+    public boolean mirrorOverlay = false; // 附加车机悬浮输出；不改变 mirror / video.enable 语义
+    // 悬浮窗自定义几何（dp；-1=按该侧默认）。左右分开存，避免换侧后窗口跑到屏幕外。
+    public int ovW = -1;   // 左右共用宽度（dp，16:9）；位置左右分开
+    public int ovLeftX = -1, ovLeftY = -1;
+    public int ovRightX = -1, ovRightY = -1;
     public int mirrorCamL = 0;         // 左灯用的相机 id（实车按需调整）
     public int mirrorCamR = 1;         // 右灯用的相机 id
     public int mirrorPort = 9002;      // 仪表端影像端口（与 config.json 的 video.port 一致）
@@ -136,6 +141,12 @@ public class Prefs {
         p.pass = sp.getString("pass", "");
         p.bridge = sp.getBoolean("bridge", true);
         p.mirror = sp.getBoolean("mirror", false);
+        p.mirrorOverlay = sp.getBoolean("mirrorOverlay", false);
+        p.ovW = sp.getInt("ovW", -1);
+        p.ovLeftX = sp.getInt("ovLeftX", -1);
+        p.ovLeftY = sp.getInt("ovLeftY", -1);
+        p.ovRightX = sp.getInt("ovRightX", -1);
+        p.ovRightY = sp.getInt("ovRightY", -1);
         p.mirrorCamL = sp.getInt("mirrorCamL", 0);
         p.mirrorCamR = sp.getInt("mirrorCamR", 1);
         p.mirrorPort = sp.getInt("mirrorPort", 9002);
@@ -195,6 +206,12 @@ public class Prefs {
         e.putString("pass", pass);
         e.putBoolean("bridge", bridge);
         e.putBoolean("mirror", mirror);
+        e.putBoolean("mirrorOverlay", mirrorOverlay);
+        e.putInt("ovW", ovW);
+        e.putInt("ovLeftX", ovLeftX);
+        e.putInt("ovLeftY", ovLeftY);
+        e.putInt("ovRightX", ovRightX);
+        e.putInt("ovRightY", ovRightY);
         e.putInt("mirrorCamL", mirrorCamL);
         e.putInt("mirrorCamR", mirrorCamR);
         e.putInt("mirrorPort", mirrorPort);
@@ -222,6 +239,12 @@ public class Prefs {
         p.extTtl = extTtl;
         p.host = host; p.port = port; p.user = user; p.pass = pass; p.bridge = bridge;
         p.mirror = mirror; p.mirrorCamL = mirrorCamL; p.mirrorCamR = mirrorCamR; p.mirrorPort = mirrorPort;
+        p.mirrorOverlay = mirrorOverlay;
+        p.ovW = ovW;
+        p.ovLeftX = ovLeftX;
+        p.ovLeftY = ovLeftY;
+        p.ovRightX = ovRightX;
+        p.ovRightY = ovRightY;
         p.mirrorAvm = mirrorAvm;
         p.quadCropEnable = quadCropEnable;
         p.quadZoomL = quadZoomL; p.quadPanXL = quadPanXL; p.quadPanYL = quadPanYL;

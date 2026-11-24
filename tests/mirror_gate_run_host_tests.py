@@ -42,6 +42,13 @@ final class MirrorStepHarness {
     int mirrorSide, mirrorRetrySide, mirrorFailures, mirrorCamera;
     boolean mirrorUsingAvm;
     MirrorSource mirrorSrc;
+    MirrorOverlay mirrorOverlay = new MirrorOverlay();
+    boolean cameraGranted = true;
+    boolean permissionThrows;
+    int checkSelfPermission(String permission) {
+        if (permissionThrows) throw new SecurityException("permission service unavailable");
+        return cameraGranted ? 0 : -1;
+    }
     int starts, stops, startedSide;
     boolean restore, closeSocket;
     void step() { mirrorStep(); }
@@ -54,9 +61,21 @@ final class MirrorStepHarness {
 }
 final class Prefs {
     static Prefs saved;
-    boolean master = true, mirror = true, mirrorAvm = true;
+    boolean master = true, mirror = true, mirrorAvm = true, mirrorOverlay;
     int mirrorCamL, mirrorCamR;
+    int ovW = -1, ovLeftX = -1, ovLeftY = -1, ovRightX = -1, ovRightY = -1;
     static Prefs load(Object ignored) { return saved; }
+}
+final class MirrorOverlay {
+    int changes, geomX, geomY, geomW;
+    boolean enabled;
+    void setEnabled(boolean value) { changes++; enabled = value; }
+    boolean isEditing() { return false; }
+    void setGeometry(int x, int y, int w) { geomX = x; geomY = y; geomW = w; }
+}
+final class MirrorAvmState {
+    static int refreshes;
+    static void refresh(Object ctx) { refreshes++; }
 }
 final class MirrorSource {
     static int yields;
@@ -65,7 +84,7 @@ final class MirrorSource {
     String lastError() { return ""; }
 }
 final class XuiLight {
-    static final int GEAR_REVERSE = 2;
+    static final int GEAR_REVERSE = 3;
     static boolean ready = true;
     static int value, reads, lampReads;
     static Boolean left, right;
@@ -103,11 +122,17 @@ def main():
         clock = out / "SystemClock.java"
         clock.write_text("package android.os; public final class SystemClock { "
                          "public static long elapsedRealtime() { return 10000; } }")
+        manifest = out / "Manifest.java"
+        manifest.write_text('package android; public final class Manifest { public static final class permission { '
+                            'public static final String CAMERA = "android.permission.CAMERA"; } }')
+        manager = out / "PackageManager.java"
+        manager.write_text('package android.content.pm; public final class PackageManager { '
+                           'public static final int PERMISSION_GRANTED = 0; }')
         subprocess.run([tool("javac"), "-encoding", "UTF-8", "-source", "8", "-target", "8",
                         "-Xlint:-options", "-d", tmp,
                         str(ROOT / "carpad/src/com/xiaopeng/clusterassist/MirrorTriggerGate.java"),
                         str(ROOT / "tests/MirrorTriggerGateTest.java"),
-                        str(harness), str(clock)], check=True)
+                        str(harness), str(clock), str(manifest), str(manager)], check=True)
         subprocess.run([tool("java"), "-ea", "-cp", tmp,
                         "com.xiaopeng.clusterassist.MirrorTriggerGateTest"], check=True)
 

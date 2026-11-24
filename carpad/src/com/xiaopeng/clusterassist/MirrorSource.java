@@ -30,7 +30,7 @@ import java.nio.ByteBuffer;
  * 顺便算 565。这样不需要额外的缩放库，也不需要中间 Bitmap。</p>
  *
  * <p>线程：Camera2 回调在自建 HandlerThread 上，转换完调
- * {@link MirrorPush#submit} 入队就返回，绝不碰网络、不阻塞相机。</p>
+ * {@link MirrorFrameSink#submit} 分发到仪表及可选车机悬浮窗后就返回，不执行网络或 UI 操作。</p>
  */
 public final class MirrorSource {
     private static final String TAG = "P7MirrorSrc";
@@ -38,15 +38,18 @@ public final class MirrorSource {
     private static final int OUT_W = MirrorPush.W;
     private static final int OUT_H = MirrorPush.H;
     private static final int OUT_LEN = OUT_W * OUT_H * 2;
+    private static final int LOCAL_W = 960;
+    private static final int LOCAL_H = 540;
+    private static final int LOCAL_LEN = LOCAL_W * LOCAL_H * 2;
 
     /**
      * 目标帧率。
      *
-     * <p>640×360 raw 一帧 460KB，链路实测 11MB/s → 上限约 23fps；取 20fps
-     * 留一点余量（20fps × 460KB = 9.2MB/s，占 84%）。之前 960×540 时
-     * 10fps 已经是带宽上限，再往上调只会让 write 阻塞、丢帧。</p>
+     * <p>跟随相机自适应：不强制固定帧率区间，夜间 AE 可降到 15fps 保证曝光，
+     * 白天最高 30fps。这里只做 30fps 上限保护；640×360 raw 30fps 约 13.5MB/s，
+     * 超过链路实测 11MB/s，因此 30 只在链路允许时短暂出现，仪表端按实收帧直写。</p>
      */
-    private static final int TARGET_FPS = 20;
+    private static final int TARGET_FPS = 30;
 
     /**
      * 四宫格取景微调（运行时可调，通过 AvmReceiver 广播 --ef zoom/panx/pany）。
@@ -120,7 +123,13 @@ public final class MirrorSource {
     private final int side;
     /** Request quad mode and gate frames on parameter readback; otherwise pass the manual stream through. */
     private final boolean quad;
-    private final MirrorPush push;
+    private final MirrorFrameSink push;
+    private final MirrorFrameSink localSink;
+    private final int knownAvmMode;
+    private final byte[] localOut = new byte[LOCAL_LEN];
+    private int[] localSx, localSy;
+    private int srcW, srcH, yRowF, uRowF, vRowF, yPixF, uPixF, vPixF;
+    private int roiX, roiY, roiW, roiH;
 
     // One process-wide owner survives stop() to drain late HAL callbacks. Never quit it
     // while an asynchronous open/close can still deliver a CameraDevice.
@@ -161,7 +170,19 @@ public final class MirrorSource {
     private volatile boolean closed;
     private volatile String lastError = "";
 
-    public MirrorSource(Context ctx, int cameraId, int side, boolean quad, MirrorPush push) {
+    public MirrorSource(Context ctx, int cameraId, int side, boolean quad, MirrorFrameSink push) {
+        this(ctx, cameraId, side, quad, push, null, -1);
+    }
+
+    public MirrorSource(Context ctx, int cameraId, int side, boolean quad, MirrorFrameSink push,
+                        int knownAvmMode) {
+        this(ctx, cameraId, side, quad, push, null, knownAvmMode);
+    }
+
+    public MirrorSource(Context ctx, int cameraId, int side, boolean quad, MirrorFrameSink push,
+                        MirrorFrameSink localSink, int knownAvmMode) {
+        this.knownAvmMode = knownAvmMode;
+        this.localSink = localSink;
         this.ctx = ctx.getApplicationContext();
         this.cameraId = cameraId;
         this.side = side;
@@ -259,7 +280,7 @@ public final class MirrorSource {
                         }
                         return AvmMode.set(mgr, mode);
                     }
-                });
+                }, knownAvmMode, knownAvmMode >= 0);
                 if (!avm.prepare()) {
                     fail("无法记录进入前 AVM 模式，不切换鱼眼");
                     return;
@@ -305,22 +326,30 @@ public final class MirrorSource {
      */
     private Size pickSize(Size[] sizes) {
         if (sizes == null || sizes.length == 0) return null;
-        Size best = null;
+        Size smallest169 = null;
+        Size best169 = null;
+        Size largest = null;
         for (Size s : sizes) {
             boolean ratio169 = Math.abs(s.getWidth() * 9 - s.getHeight() * 16) <= 16 * 4;
+            if (largest == null || s.getWidth() * s.getHeight() > largest.getWidth() * largest.getHeight()) {
+                largest = s;
+            }
             if (!ratio169) continue;
             if (s.getWidth() < OUT_W || s.getHeight() < OUT_H) continue;
-            if (best == null || s.getWidth() * s.getHeight() < best.getWidth() * best.getHeight()) {
-                best = s;
+            if (smallest169 == null
+                    || s.getWidth() * s.getHeight() < smallest169.getWidth() * smallest169.getHeight()) {
+                smallest169 = s;
+            }
+            // Quad crops one quarter; 1920x1080 gives 960x540 per cell instead of 640x362.
+            if (s.getWidth() <= 1920 && s.getHeight() <= 1080
+                    && (best169 == null
+                    || s.getWidth() * s.getHeight() > best169.getWidth() * best169.getHeight())) {
+                best169 = s;
             }
         }
-        if (best != null) return best;
-        for (Size s : sizes) {
-            if (best == null || s.getWidth() * s.getHeight() > best.getWidth() * best.getHeight()) {
-                best = s;
-            }
-        }
-        return best;
+        if (quad && best169 != null) return best169;
+        if (smallest169 != null) return smallest169;
+        return best169 != null ? best169 : largest;
     }
 
     private final CameraDevice.StateCallback callback = new CameraDevice.StateCallback() {
@@ -441,6 +470,14 @@ public final class MirrorSource {
                 lastFrameAt = now;
                 long t0 = System.currentTimeMillis();
                 convert(img);
+                if (localSink != null) {
+                    try {
+                        convertLocal();
+                        localSink.submit(localOut, side);
+                    } catch (RuntimeException localError) {
+                        Log.w(TAG, "本地高清帧失败: " + localError);
+                    }
+                }
                 statConvertMs += System.currentTimeMillis() - t0;
                 if (!closed) push.submit(out, side);
                 statFrames++;
@@ -466,35 +503,45 @@ public final class MirrorSource {
         ByteBuffer yb = p[0].getBuffer();
         ByteBuffer ub = p[1].getBuffer();
         ByteBuffer vb = p[2].getBuffer();
-        int yRow = p[0].getRowStride(), yPix = p[0].getPixelStride();
-        int uRow = p[1].getRowStride(), uPix = p[1].getPixelStride();
-        int vRow = p[2].getRowStride(), vPix = p[2].getPixelStride();
-        int w = img.getWidth(), h = img.getHeight();
+        srcW = img.getWidth();
+        srcH = img.getHeight();
+        yRowF = p[0].getRowStride(); yPixF = p[0].getPixelStride();
+        uRowF = p[1].getRowStride(); uPixF = p[1].getPixelStride();
+        vRowF = p[2].getRowStride(); vPixF = p[2].getPixelStride();
 
-        yArr = ensure(yArr, yRow * h + 16);
-        uArr = ensure(uArr, uRow * ((h + 1) / 2) + 16);
-        vArr = ensure(vArr, vRow * ((h + 1) / 2) + 16);
+        yArr = ensure(yArr, yRowF * srcH + 16);
+        uArr = ensure(uArr, uRowF * ((srcH + 1) / 2) + 16);
+        vArr = ensure(vArr, vRowF * ((srcH + 1) / 2) + 16);
         copy(yb, yArr);
         copy(ub, uArr);
         copy(vb, vArr);
 
         // 源尺寸变了、或运行时取景参数被广播改了，都重建采样表（下一帧即生效）
-        if (tabSrcW != w || tabSrcH != h || lastQuadCropSeq != quadCropSeq) {
+        if (tabSrcW != srcW || tabSrcH != srcH || lastQuadCropSeq != quadCropSeq) {
             lastQuadCropSeq = quadCropSeq;
-            buildTabs(w, h);
+            buildTabs(srcW, srcH);
         }
+        render(out, OUT_W, OUT_H, sxTab, syTab);
+    }
 
+    /** Local-only high-resolution frame for the head-unit overlay; network stays 640×360. */
+    private void convertLocal() {
+        if (localSink == null || localSx == null) return;
+        render(localOut, LOCAL_W, LOCAL_H, localSx, localSy);
+    }
+
+    private void render(byte[] dst, int dw, int dh, int[] sx, int[] sy) {
         int i = 0;
-        for (int y = 0; y < OUT_H; y++) {
-            int sy = syTab[y];
-            int yOff = sy * yRow;
-            int uOff = (sy >> 1) * uRow;
-            int vOff = (sy >> 1) * vRow;
-            for (int x = 0; x < OUT_W; x++) {
-                int sx = sxTab[x];
-                int yv = yArr[yOff + sx * yPix] & 0xFF;
-                int u = (uArr[uOff + (sx >> 1) * uPix] & 0xFF) - 128;
-                int v = (vArr[vOff + (sx >> 1) * vPix] & 0xFF) - 128;
+        for (int y = 0; y < dh; y++) {
+            int sampleY = sy[y];
+            int yOff = sampleY * yRowF;
+            int uOff = (sampleY >> 1) * uRowF;
+            int vOff = (sampleY >> 1) * vRowF;
+            for (int x = 0; x < dw; x++) {
+                int sampleX = sx[x];
+                int yv = yArr[yOff + sampleX * yPixF] & 0xFF;
+                int u = (uArr[uOff + (sampleX >> 1) * uPixF] & 0xFF) - 128;
+                int v = (vArr[vOff + (sampleX >> 1) * vPixF] & 0xFF) - 128;
 
                 int r = yv + ((91881 * v) >> 16);
                 int g = yv - ((22554 * u + 46802 * v) >> 16);
@@ -504,8 +551,8 @@ public final class MirrorSource {
                 if (bl < 0) bl = 0; else if (bl > 255) bl = 255;
 
                 int v565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (bl >> 3);
-                out[i++] = (byte) (v565 & 0xFF);
-                out[i++] = (byte) ((v565 >> 8) & 0xFF);
+                dst[i++] = (byte) (v565 & 0xFF);
+                dst[i++] = (byte) ((v565 >> 8) & 0xFF);
             }
         }
     }
@@ -514,9 +561,28 @@ public final class MirrorSource {
      * Firmware must still be checked for correct physical left/right mapping on a parked vehicle.
      */
     private void buildTabs(int srcW, int srcH) {
-        sxTab = new int[OUT_W];
-        syTab = new int[OUT_H];
+        int[] r = computeRoi(srcW, srcH);
+        roiX = r[0]; roiY = r[1]; roiW = r[2]; roiH = r[3];
+        if (sxTab == null) { sxTab = new int[OUT_W]; syTab = new int[OUT_H]; }
+        fillTabs(sxTab, syTab, OUT_W, OUT_H);
+        if (localSink != null) {
+            if (localSx == null) { localSx = new int[LOCAL_W]; localSy = new int[LOCAL_H]; }
+            fillTabs(localSx, localSy, LOCAL_W, LOCAL_H);
+        }
+        tabSrcW = srcW;
+        tabSrcH = srcH;
+    }
 
+    private void fillTabs(int[] sx, int[] sy, int dw, int dh) {
+        for (int x = 0; x < dw; x++) {
+            sx[x] = Math.min(srcW - 1, roiX + (int) ((long) x * roiW / dw));
+        }
+        for (int y = 0; y < dh; y++) {
+            sy[y] = Math.min(srcH - 1, roiY + (int) ((long) y * roiH / dh));
+        }
+    }
+
+    private int[] computeRoi(int srcW, int srcH) {
         int x0 = 0, y0 = 0, rw = srcW, rh = srcH;
         if (quad) {
             // 四宫格鱼眼：每格占源画面的 1/4，打左灯取左下格、右灯取右下格。
@@ -546,15 +612,7 @@ public final class MirrorSource {
                     + " " + rw + "x" + rh + " src=" + srcW + "x" + srcH
                     + " zoom=" + zoom + " pan=" + panX + "," + panY);
         }
-
-        for (int x = 0; x < OUT_W; x++) {
-            sxTab[x] = Math.min(srcW - 1, x0 + (int) ((long) x * rw / OUT_W));
-        }
-        for (int y = 0; y < OUT_H; y++) {
-            syTab[y] = Math.min(srcH - 1, y0 + (int) ((long) y * rh / OUT_H));
-        }
-        tabSrcW = srcW;
-        tabSrcH = srcH;
+        return new int[]{x0, y0, rw, rh};
     }
 
     private static byte[] ensure(byte[] a, int need) {

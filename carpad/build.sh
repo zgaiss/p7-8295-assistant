@@ -37,6 +37,7 @@ python "$ROOT/tools/build_version.py" prepare --out build
     -I "$AJAR" \
     --manifest build/AndroidManifest.xml \
     --min-sdk-version 28 --target-sdk-version 28 \
+    --custom-package com.xiaopeng.clusterassist \
     --java build/gen \
     build/compiled/res.zip
 

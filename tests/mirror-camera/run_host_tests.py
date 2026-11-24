@@ -58,6 +58,8 @@ public class Log { public static int i(String tag,String msg){return 0;}
     "android/util/Size.java": '''package android.util;
 public class Size { private final int w,h; public Size(int w,int h){this.w=w;this.h=h;}
  public int getWidth(){return w;} public int getHeight(){return h;} }''',
+    "android/util/Range.java": '''package android.util;
+public class Range<T> { public final T lower, upper; public Range(T l, T u){lower=l;upper=u;} }''',
     "android/view/Surface.java": '''package android.view; public class Surface {}''',
     "android/hardware/camera2/CameraAccessException.java": '''package android.hardware.camera2;
 public class CameraAccessException extends Exception {}''',
@@ -73,8 +75,11 @@ public class CameraCharacteristics {
 }''',
     "android/hardware/camera2/CaptureRequest.java": '''package android.hardware.camera2;
 import android.view.Surface;
-public class CaptureRequest { public static class Builder {
- public void addTarget(Surface s){} public CaptureRequest build(){return new CaptureRequest();} } }''',
+public class CaptureRequest {
+ public static final Object CONTROL_AE_TARGET_FPS_RANGE = new Object();
+ public static class Builder {
+  public void addTarget(Surface s){} public void set(Object k,Object v){}
+  public CaptureRequest build(){return new CaptureRequest();} } }''',
     "android/hardware/camera2/CameraCaptureSession.java": '''package android.hardware.camera2;
 import android.os.Handler;
 public class CameraCaptureSession {
@@ -160,7 +165,7 @@ final class AvmMode {
  static String lastError(){return "fake AVM mode";}
 }''',
     "com/xiaopeng/clusterassist/MirrorPush.java": '''package com.xiaopeng.clusterassist;
-public class MirrorPush { public static final int W=640,H=360; public int submits;
+public class MirrorPush implements MirrorFrameSink { public static final int W=640,H=360; public int submits;
  public void submit(byte[] b,int side){submits++;} }''',
     "com/xiaopeng/clusterassist/Prefs.java": '''package com.xiaopeng.clusterassist;
 public class Prefs { public boolean quadCropEnable=true; public float quadZoomL=2,quadZoomR=2;
@@ -195,6 +200,7 @@ def main():
             tool("javac"), "-encoding", "UTF-8", "-source", "8", "-target", "8",
             "-Xlint:-options", "-d", str(output),
             *fake_files, str(real / "MirrorSource.java"), str(real / "MirrorAvmSession.java"),
+            str(real / "MirrorFrameSink.java"),
             str(ROOT / "tests/mirror-camera/MirrorCameraLifecycleTest.java"),
         ], check=True)
         subprocess.run([
