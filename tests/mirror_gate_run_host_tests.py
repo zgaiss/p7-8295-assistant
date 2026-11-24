@@ -63,12 +63,19 @@ final class Prefs {
     static Prefs saved;
     boolean master = true, mirror = true, mirrorAvm = true, mirrorOverlay;
     int mirrorCamL, mirrorCamR;
+    int ovW = -1, ovLeftX = -1, ovLeftY = -1, ovRightX = -1, ovRightY = -1;
     static Prefs load(Object ignored) { return saved; }
 }
 final class MirrorOverlay {
-    int changes;
+    int changes, geomX, geomY, geomW;
     boolean enabled;
     void setEnabled(boolean value) { changes++; enabled = value; }
+    boolean isEditing() { return false; }
+    void setGeometry(int x, int y, int w) { geomX = x; geomY = y; geomW = w; }
+}
+final class MirrorAvmState {
+    static int refreshes;
+    static void refresh(Object ctx) { refreshes++; }
 }
 final class MirrorSource {
     static int yields;
@@ -77,7 +84,7 @@ final class MirrorSource {
     String lastError() { return ""; }
 }
 final class XuiLight {
-    static final int GEAR_REVERSE = 2;
+    static final int GEAR_REVERSE = 3;
     static boolean ready = true;
     static int value, reads, lampReads;
     static Boolean left, right;

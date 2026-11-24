@@ -29,7 +29,8 @@ FAKES = {
     """,
     "android/util/Log.java": """
         package android.util;
-        public final class Log { public static int w(String tag, String message) { return 0; } }
+        public final class Log { public static int w(String tag, String message) { return 0; }
+            public static int i(String tag, String message) { return 0; } }
     """,
     "android/content/res/Resources.java": """
         package android.content.res;
@@ -157,6 +158,9 @@ FAKES = {
             public Paint(int flags) { }
             public void setColor(int color) { }
             public void setTextSize(float size) { }
+            public void setStyle(Style style) { }
+            public void setStrokeWidth(float width) { }
+            public enum Style { FILL, STROKE }
         }
     """,
     "android/graphics/Color.java": """
@@ -181,9 +185,31 @@ FAKES = {
             public void drawText(String value,float x,float y,Paint p) { text=value; }
         }
     """,
+    "android/view/MotionEvent.java": """
+        package android.view;
+        public class MotionEvent {
+            public static final int ACTION_DOWN=0, ACTION_UP=1, ACTION_MOVE=2, ACTION_CANCEL=3;
+            public float rawX, rawY;
+            public int getActionMasked() { return ACTION_DOWN; }
+            public float getRawX() { return rawX; }
+            public float getRawY() { return rawY; }
+        }
+    """,
+    "android/view/GestureDetector.java": """
+        package android.view;
+        import android.content.Context;
+        public class GestureDetector {
+            public GestureDetector(Context c, SimpleOnGestureListener l) { }
+            public boolean onTouchEvent(MotionEvent e) { return false; }
+            public static class SimpleOnGestureListener {
+                public boolean onDown(MotionEvent e) { return false; }
+                public boolean onDoubleTap(MotionEvent e) { return false; }
+            }
+        }
+    """,
     "android/view/Gravity.java": """
         package android.view;
-        public final class Gravity { public static final int LEFT=3, RIGHT=5, CENTER_VERTICAL=16; }
+        public final class Gravity { public static final int LEFT=3, RIGHT=5, TOP=48, CENTER_VERTICAL=16; }
     """,
     "android/view/View.java": """
         package android.view;
@@ -198,6 +224,8 @@ FAKES = {
             public Resources getResources() { return context.getResources(); }
             public int getWidth() { return width; }
             public int getHeight() { return height; }
+            public interface OnTouchListener { boolean onTouch(View v, MotionEvent e); }
+            public void setOnTouchListener(OnTouchListener l) { }
             public void setVisibility(int value) { visibility=value; }
             public void invalidate() { invalidations++; }
             protected void onDraw(Canvas canvas) { }
@@ -223,7 +251,7 @@ FAKES = {
         public class WindowManager {
             public static class LayoutParams {
                 public static final int TYPE_APPLICATION_OVERLAY=2038, FLAG_NOT_FOCUSABLE=8,
-                    FLAG_NOT_TOUCHABLE=16, FLAG_LAYOUT_IN_SCREEN=256;
+                    FLAG_NOT_TOUCHABLE=16, FLAG_NOT_TOUCH_MODAL=32, FLAG_LAYOUT_IN_SCREEN=256;
                 public int width,height,type,flags,format,gravity,x,y;
                 public float alpha=1;
                 public CharSequence title;

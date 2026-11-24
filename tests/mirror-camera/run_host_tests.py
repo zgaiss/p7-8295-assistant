@@ -58,6 +58,8 @@ public class Log { public static int i(String tag,String msg){return 0;}
     "android/util/Size.java": '''package android.util;
 public class Size { private final int w,h; public Size(int w,int h){this.w=w;this.h=h;}
  public int getWidth(){return w;} public int getHeight(){return h;} }''',
+    "android/util/Range.java": '''package android.util;
+public class Range<T> { public final T lower, upper; public Range(T l, T u){lower=l;upper=u;} }''',
     "android/view/Surface.java": '''package android.view; public class Surface {}''',
     "android/hardware/camera2/CameraAccessException.java": '''package android.hardware.camera2;
 public class CameraAccessException extends Exception {}''',
@@ -73,8 +75,11 @@ public class CameraCharacteristics {
 }''',
     "android/hardware/camera2/CaptureRequest.java": '''package android.hardware.camera2;
 import android.view.Surface;
-public class CaptureRequest { public static class Builder {
- public void addTarget(Surface s){} public CaptureRequest build(){return new CaptureRequest();} } }''',
+public class CaptureRequest {
+ public static final Object CONTROL_AE_TARGET_FPS_RANGE = new Object();
+ public static class Builder {
+  public void addTarget(Surface s){} public void set(Object k,Object v){}
+  public CaptureRequest build(){return new CaptureRequest();} } }''',
     "android/hardware/camera2/CameraCaptureSession.java": '''package android.hardware.camera2;
 import android.os.Handler;
 public class CameraCaptureSession {

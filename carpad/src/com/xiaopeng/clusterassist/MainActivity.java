@@ -884,9 +884,20 @@ public class MainActivity extends Activity {
                 });
         swMirrorOverlay = (PillSwitch) overlay.getTag();
         p.addView(overlay);
-        p.addView(ui.hint("固定 16:9 侧边窗，左灯在左、右灯在右；不接收触摸、不抢焦点，需在本页关闭；断流 800ms 自动撤窗。\n"
+        p.addView(ui.hint("16:9 侧边窗，左灯在左、右灯在右；不接收触摸、不抢焦点，需在本页关闭；断流 800ms 自动撤窗。\n"
                 + "悬浮窗只是附加显示，不替代仪表输出。授权取消、未授权返回或权限被系统收回时保持/回退为关闭，不循环弹窗。请勿依赖辅助影像判断行车安全。"));
-
+        p.addView(ui.hint("双击悬浮窗可在任何挡位进入编辑：拖动画面移动、拖右下角缩放，双击或点左上角“完成”退出；左右位置分别保存，大小两边共用。"
+                + "行驶中请勿编辑，避免遮挡或误触。"));
+        p.addView(ui.buttonRow(ui.button("重置悬浮窗大小和位置", false, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                prefs.ovW = -1;
+                prefs.ovLeftX = prefs.ovLeftY = -1;
+                prefs.ovRightX = prefs.ovRightY = -1;
+                prefs.save(MainActivity.this);
+                schedulePush(120, false);
+                toast("已重置悬浮窗大小和位置");
+            }
+        })));
         p.addView(ui.group("相机与视角（仪表 / 悬浮窗共用）"));
         p.addView(toggle("鱼眼视角", "四路鱼眼",
                 "开：请求四路鱼眼并检查参数模式，未确认则不推流；松灯有条件尝试还原，倒挡优先让位。\n"

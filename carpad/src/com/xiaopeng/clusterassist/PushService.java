@@ -153,7 +153,6 @@ public class PushService extends Service {
     private static final int MIRROR_POLL_MS = 200;
     private MirrorPush mirrorPush;
     private MirrorSource mirrorSrc;
-    private MirrorFrameFanout mirrorFrames;
     private MirrorOverlay mirrorOverlay;
     private int mirrorSide;   // 0=无 1=左 2=右
     private boolean mirrorPermWarned;
@@ -187,6 +186,8 @@ public class PushService extends Service {
             prefs = Prefs.load(this);
         }
         boolean enabled = prefs.master && prefs.mirror;
+        // Preload the shell-visible AVM mode while waiting; the vendor readback is empty.
+        if (enabled && prefs.mirrorAvm) MirrorAvmState.refresh(this);
         long nowMs = System.currentTimeMillis();
         // XUI 订阅失败（车机没起来 / 服务还没就绪）时 5 秒重试一次，不影响 200ms 主轮询节拍
         if (enabled && !XuiLight.isReady() && nowMs - xuiRetryAt >= 5000) {
@@ -247,7 +248,13 @@ public class PushService extends Service {
             stopMirror(false);
             return;
         }
-        if (mirrorOverlay != null) mirrorOverlay.setEnabled(prefs.mirrorOverlay);
+        if (mirrorOverlay != null) {
+            mirrorOverlay.setEnabled(prefs.mirrorOverlay);
+            if (!mirrorOverlay.isEditing()) {
+                if (mirrorSide == 1) mirrorOverlay.setGeometry(prefs.ovLeftX, prefs.ovLeftY, prefs.ovW);
+                else if (mirrorSide == 2) mirrorOverlay.setGeometry(prefs.ovRightX, prefs.ovRightY, prefs.ovW);
+            }
+        }
         if (side == MirrorTriggerGate.WAIT) return;
         if (mirrorRetrySide != side) {
             mirrorRetrySide = side;
@@ -287,8 +294,17 @@ public class PushService extends Service {
         MirrorSource.applyFromPrefs(prefs);
         // AVM controls the composed stream, not separate left/right camera IDs.
         final int cam = prefs.mirrorAvm ? 0 : (side == 1 ? prefs.mirrorCamL : prefs.mirrorCamR);
-        if (mirrorFrames != null) mirrorFrames.close();
-        if (mirrorOverlay == null) mirrorOverlay = new MirrorOverlay(this);
+        if (mirrorOverlay == null) mirrorOverlay = new MirrorOverlay(this, new MirrorOverlay.Store() {
+            @Override public void save(int side, int x, int y, int w) {
+                prefs.ovW = w;
+                if (side == 1) {
+                    prefs.ovLeftX = x; prefs.ovLeftY = y;
+                } else {
+                    prefs.ovRightX = x; prefs.ovRightY = y;
+                }
+                prefs.save(PushService.this);
+            }
+        });
         mirrorOverlay.setEnabled(prefs.mirrorOverlay);
         MirrorFrameSink localPreview = mirrorOverlay.begin(side);
         if (mirrorSrc != null) mirrorSrc.stop();
@@ -300,8 +316,8 @@ public class PushService extends Service {
         mirrorPermWarned = false;
         // Source owns command/open/readback/session/close in one serialized lifecycle.
         // A dispatch boolean or a fixed delay must never select a quad crop alone.
-        mirrorFrames = new MirrorFrameFanout(localPreview, mirrorPush);
-        mirrorSrc = new MirrorSource(this, cam, side, prefs.mirrorAvm, mirrorFrames);
+        mirrorSrc = new MirrorSource(this, cam, side, prefs.mirrorAvm, mirrorPush, localPreview,
+                MirrorAvmState.mode());
         mirrorSrc.start();
         Log.i("P7Mirror", "打灯 " + side + " camera=" + cam + " AVM=" + prefs.mirrorAvm);
     }
@@ -309,10 +325,6 @@ public class PushService extends Service {
     private void stopMirror(boolean closeSocket) { stopMirror(closeSocket, true); }
 
     private void stopMirror(boolean closeSocket, boolean restoreMode) {
-        if (mirrorFrames != null) {
-            mirrorFrames.close();
-            mirrorFrames = null;
-        }
         if (mirrorOverlay != null) mirrorOverlay.hide();
         if (mirrorSrc != null) {
             mirrorSrc.stop(restoreMode);

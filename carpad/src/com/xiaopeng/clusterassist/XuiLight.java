@@ -43,8 +43,9 @@ public class XuiLight {
     private static final int ID_TURN_LEFT = 0x21401c17;   // BCM_LTURNLAMP_ST
     private static final int ID_TURN_RIGHT = 0x21401c18;  // BCM_RTURNLAMP_ST
 
-    /** XUI 挡位编码：1=P 2=R 3=N 4=D（实测 P/N/D，R 为推断值）。与 CarProperty 的 VCU 编码不同。 */
-    public static final int GEAR_REVERSE = 2;
+    /** XUI 挡位编码与本车 VCU 属性一致：1=D 2=N 3=R 4=P。
+     *  2026-11-24 实车挂挡核对为 P=4 / R=3 / N=2 / D=1；早期把编码方向写反会把倒挡当成普通挡。 */
+    public static final int GEAR_REVERSE = 3;
 
     /** 转向灯闪烁周期约 960ms（亮 480 / 灭 480）。窗口取 1.6s：能跨过一个「灭」的空档，
      *  又能在真熄灯后 1.6s 内撤区，不会让画面赖在屏幕上。 */

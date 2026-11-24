@@ -13,7 +13,7 @@ import java.util.Arrays;
 
 /** Deterministic host checks of the real production classes, not extracted copies. */
 public final class MirrorOverlayTest {
-    private static final int BYTES = 640 * 360 * 2;
+    private static final int BYTES = 960 * 540 * 2;
     private static int checks, scenarios, failures;
 
     private static void check(boolean ok, String reason) {
@@ -58,7 +58,7 @@ public final class MirrorOverlayTest {
     private static final class Fixture {
         final Context context = new Context();
         final WindowManager windows = context.windows;
-        final MirrorOverlay overlay = new MirrorOverlay(context);
+        final MirrorOverlay overlay = new MirrorOverlay(context, null);
         MirrorFrameSink sink;
         Fixture() { overlay.setEnabled(true); sink = overlay.begin(1); }
         void frame(int value) { sink.submit(pixels(value), 1); Handler.runReady(); }
@@ -197,7 +197,7 @@ public final class MirrorOverlayTest {
         check(f.windows.adds == 1 && f.windows.installed.size() == 1, "first fresh frame adds exactly one real overlay");
         Canvas canvas = f.draw();
         check(canvas.bitmapDraws == 1 && canvas.bitmap.config == Bitmap.Config.RGB_565, "production onDraw renders RGB565 bitmap");
-        check(canvas.bitmap.width == 640 && canvas.bitmap.height == 360, "same source dimensions retained");
+        check(canvas.bitmap.width == 960 && canvas.bitmap.height == 540, "native quad cell retained");
         check(canvas.bitmap.pixels[0] == 21 && canvas.bitmap.pixels[BYTES - 1] == 21, "queued UI never reads mutated capture buffer");
         check("左转影像".equals(canvas.text), "left label is rendered");
         check(canvas.destination.right == f.windows.lastLayout.width && canvas.destination.bottom == f.windows.lastLayout.height,
@@ -221,11 +221,11 @@ public final class MirrorOverlayTest {
         Fixture f = new Fixture(); f.frame(1);
         WindowManager.LayoutParams p = f.windows.lastLayout;
         check(p.type == WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, "uses ordinary overlay window type");
-        int required = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
-        check((p.flags & required) == required, "window cannot intercept touch or focus");
-        check(Math.abs(p.alpha - .8f) < .00001f, "opacity is exactly 80 percent for touch-through");
-        check(p.gravity == (Gravity.LEFT | Gravity.CENTER_VERTICAL), "left source is left-center");
-        check(p.x == 16 && p.width == 480 && p.height == 270, "default margins and size use dp with width cap");
+        check((p.flags & WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0, "window never takes focus");
+        check((p.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0, "window is touchable for double-tap editing");
+        check(Math.abs(p.alpha - 1f) < .00001f, "overlay is fully opaque");
+        check(p.gravity == (Gravity.TOP | Gravity.LEFT), "absolute top-left placement for drag");
+        check(p.x == 16 && p.y == 405 && p.width == 480 && p.height == 270, "default left margin, centered vertically, 480dp");
     }
 
     private static void layoutSizes() {
@@ -236,10 +236,25 @@ public final class MirrorOverlayTest {
             f.context.resources.metrics.density=screen[2]; f.frame(1);
             WindowManager.LayoutParams p = f.windows.lastLayout;
             check(p.width * 9 == p.height * 16, "16:9 display aspect for integral reference screen");
-            check(p.width <= Math.round(480 * screen[2]) && p.width <= screen[0] * 2 / 5, "width capped at 480dp and 40 percent");
+            check(p.width + 32 * screen[2] <= screen[0], "width stays within screen margins");
             check(p.height + 32 * screen[2] <= screen[1], "window stays within vertical margins");
             f.overlay.destroy();
         }
+    }
+
+    private static void customGeometry() {
+        Fixture f = new Fixture();
+        f.overlay.setGeometry(100, 50, 700);
+        f.frame(1);
+        WindowManager.LayoutParams p = f.windows.lastLayout;
+        check(p.x == 100 && p.y == 50, "custom absolute position is applied");
+        check(p.width == 700 && p.height == 393, "custom width keeps 16:9");
+        f.overlay.setGeometry(-1, -1, 2000);
+        f.frame(2);
+        p = f.windows.lastLayout;
+        check(p.width == 1863 && p.height == 1047, "width clamps to the screen maximum");
+        check(p.x == 16 && p.y == 16, "negative coordinates fall back to left margin and vertical center");
+        f.overlay.destroy();
     }
 
     private static void hideAndLateFrames() {
@@ -290,7 +305,7 @@ public final class MirrorOverlayTest {
         check(f.windows.adds == 1, "new sink cannot submit mismatching side");
         f.sink.submit(pixels(5), 2); Handler.runReady();
         check(f.windows.adds == 2 && f.draw().bitmap.pixels[0] == 5, "new right-side frame is the only accepted content");
-        check(f.windows.lastLayout.gravity == (Gravity.RIGHT | Gravity.CENTER_VERTICAL), "right source uses right-center");
+        check(f.windows.lastLayout.gravity == (Gravity.TOP | Gravity.LEFT) && f.windows.lastLayout.x == 1920 - f.windows.lastLayout.width - 16, "right source anchors to the right edge");
         check("右转影像".equals(f.draw().text), "direction label changes with source");
     }
 
@@ -300,7 +315,7 @@ public final class MirrorOverlayTest {
         Fixture g = new Fixture(); g.context.overlayGranted=false; g.frame(1);
         check(g.windows.adds == 0, "overlay denial blocks addView");
         Context absent = new Context(); absent.windows=null;
-        MirrorOverlay overlay = new MirrorOverlay(absent); overlay.setEnabled(true);
+        MirrorOverlay overlay = new MirrorOverlay(absent, null); overlay.setEnabled(true);
         overlay.begin(1).submit(pixels(1), 1); Handler.runReady();
         check(Handler.pending() == 0, "missing window service fails closed without retry loop");
     }
@@ -392,10 +407,10 @@ public final class MirrorOverlayTest {
 
     private static void layoutUpdate() {
         Fixture f = new Fixture(); f.frame(1);
-        f.context.resources.metrics.widthPixels=800;
+        f.context.resources.metrics.widthPixels=400;
         f.frame(2);
         check(f.windows.adds == 1 && f.windows.updates == 1, "display metrics changes use update not second add");
-        check(f.windows.lastLayout.width == 320 && f.windows.lastLayout.height == 180, "resized screen keeps image aspect ratio");
+        check(f.windows.lastLayout.width == 368 && f.windows.lastLayout.height == 207, "resized screen keeps image aspect ratio");
     }
 
     private static void addFailureIsolated() {
@@ -416,7 +431,7 @@ public final class MirrorOverlayTest {
 
     private static void updateFailureIsolated() {
         Fixture f = new Fixture(); f.frame(1);
-        f.windows.updateThrows=true; f.context.resources.metrics.widthPixels=800;
+        f.windows.updateThrows=true; f.context.resources.metrics.widthPixels=400;
         Counter remote = new Counter();
         new MirrorFrameFanout(f.sink, remote).submit(pixels(2), 1); Handler.runReady();
         check(remote.calls == 1 && f.windows.updates == 1, "update failure never interrupts remote sink");
@@ -471,6 +486,7 @@ public final class MirrorOverlayTest {
         run("overlay bounded UI render and redraw without re-add", MirrorOverlayTest::newestFrame);
         run("overlay noninteractive flags and 80 percent alpha", MirrorOverlayTest::windowFlags);
         run("overlay 16:9 aspect and size limits", MirrorOverlayTest::layoutSizes);
+        run("overlay custom size and vertical offset", MirrorOverlayTest::customGeometry);
         run("overlay hide rejects queued/late frames", MirrorOverlayTest::hideAndLateFrames);
         run("overlay disabled drops queued frames", MirrorOverlayTest::disabledClearsPending);
         run("overlay destroy cannot revive", MirrorOverlayTest::destroyedCannotRevive);
