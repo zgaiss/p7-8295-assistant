@@ -65,10 +65,11 @@ public final class MirrorTriggerGateTest {
         h = harness(4, false, true); h.step();
         check(h.starts == 1 && h.startedSide == 2, "production mirrorStep: right starts");
         h = harness(4, false, false); h.step();
-        check(h.starts == 0 && h.stops == 1 && h.restore && !h.closeSocket,
-                "production mirrorStep: ordinary lamp-off restores, socket stays");
+        check(h.starts == 0 && h.stops == 1 && h.restore && h.closeSocket,
+                "production mirrorStep: ordinary lamp-off restores and drops the socket for an instant revoke");
         h = harness(4, true, true); h.step();
-        check(h.stops == 1 && h.restore, "production mirrorStep: hazards end normally");
+        check(h.stops == 1 && h.restore && h.closeSocket,
+                "production mirrorStep: hazards end normally and drop the socket");
         h = harness(4, true, false); Prefs.saved.mirror = false; h.step();
         check(h.starts == 0 && h.stops == 1 && h.restore && h.closeSocket,
                 "production mirrorStep: disabled non-R restores and closes socket");

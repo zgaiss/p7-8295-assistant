@@ -145,12 +145,14 @@ public class PushService extends Service {
 
     // ---- 打灯影像（仪表半屏）----
     //
-    // 唯一的门控入口：200ms 轮询转向灯，side 变了才去动相机与推流。三条硬规则：
+    // 唯一的门控入口：50ms 轮询转向灯，side 变了才去动相机与推流。四条硬规则：
     //   ① 读不到（null）保持现状，绝不把"未知"当成"灭"，否则过隧道/信号抖动就闪；
     //   ② 倒挡一律不显示——倒车时视线在倒车影像上，半屏影像只会添乱；
-    //   ③ 熄灯立刻停相机（放开 HAL，不和原厂 AVM 抢），推流 socket 保持不动，
-    //      仪表那边靠"800ms 无新帧自动撤区"收尾，比发撤区帧少一次往返。
-    private static final int MIRROR_POLL_MS = 200;
+    //   ③ 熄灯立刻停相机（放开 HAL，不和原厂 AVM 抢），并断开推流 socket：
+    //      仪表在 TCP 断开时立即投撤区帧，不用再等 800ms 无新帧兜底；
+    //   ④ "仍在闪"由 XuiLight/TurnLamp 按 800ms 相变跨过 480ms 灭相，
+    //      熄灯的那次灭事件立即生效，不再多等一个 1.6s 的亮事件超时。
+    private static final int MIRROR_POLL_MS = 50;
     private MirrorPush mirrorPush;
     private MirrorSource mirrorSrc;
     private MirrorOverlay mirrorOverlay;
@@ -238,7 +240,9 @@ public class PushService extends Service {
         }
         if (side == MirrorTriggerGate.STOP) {
             // A known non-reverse end (including disable) restores the saved mode.
-            stopMirror(!enabled, true);
+            // Always drop the push socket: the cluster revokes on disconnect, so the
+            // previous view disappears now instead of waiting out its 800ms stale gate.
+            stopMirror(true, true);
             mirrorRetrySide = 0;
             mirrorFailures = 0;
             return;
