@@ -99,8 +99,10 @@ python3 tools/build_version.py prepare --out /tmp/p7-instrument-build
 
 `tools/car-read-probe/CarReadProbe.java` 是独立单文件探针，不依赖完整代理或 APK。
 以 shell UID2000 启动一次 `app_process`，只连接一次 `car_service → property`，
-固定读取 Issue #27 已给出的车速属性 `0x21601225`、area=0，共5次、间隔1秒后退出。
-没有端口、缓存、后台服务、守护、自动重连或属性扫描，不改变现有 App 轮询。
+默认固定读取 Issue #27 已给出的车速属性 `0x21601225`、area=0，共5次、间隔1秒后退出。
+`--all` 则从同一接口的 `getPropertyList()` 获取当前调用方可见配置，对其中 access 含 READ 的
+属性/areaId 各读一次，跳过只写配置、去重，单项异常继续；不枚举猜测的 ID、不写属性。
+没有端口、缓存、后台服务、守护或自动重连，不改变现有 App 轮询。
 
 主机依赖 Python 3、JDK（可用 `JAVA_HOME` 指定）及 Android SDK 的 d8/android.jar；
 SDK 取 `ANDROID_SDK_ROOT` / `ANDROID_HOME`，也可通过构建脚本 `--sdk` 指定。
@@ -114,7 +116,7 @@ python3 tools/car-read-probe/test_probe.py
 产物是已忽略的 `dist/car-read-probe/car-read-probe.jar`，仅含 dex，最低 Android API28。
 主机测试使用临时假 Android 类，只验证反射调用契约、错误定位和限时退出，不代表实车可用。
 
-**以下是待人工驻车执行的命令，本轮未连接车辆、未执行这些设备操作。**
+**只在自己授权且已安全驻车的车机上运行以下只读实验。**
 先选择自己已授权的目标，确认 `id` 为 uid=2000(shell)，不要 `adb root`；
 目标还须有 `/system/framework/android.car.jar`、`app_process` 和 toybox timeout。
 上传只涉及独立临时 jar，不安装 APK、不修改系统；不要同时重复运行此实验。
@@ -126,7 +128,19 @@ adb -s "$SERIAL" push dist/car-read-probe/car-read-probe.jar /data/local/tmp/p7-
 adb -s "$SERIAL" shell 'CLASSPATH=/system/framework/android.car.jar:/data/local/tmp/p7-car-read-probe.jar toybox timeout 20 app_process /system/bin CarReadProbe'
 ```
 
-每个关键步骤先输出 `BEGIN`；成功时应看到 `OK uid=2000`、一次 `OK connected_once`、
+如需按目标声明的可读配置逐项取一次值，用下面命令**替代**上面的默认运行命令，不要同时启动两份：
+
+```sh
+adb -s "$SERIAL" shell 'CLASSPATH=/system/framework/android.car.jar:/data/local/tmp/p7-car-read-probe.jar toybox timeout 200 app_process /system/bin CarReadProbe --all'
+```
+
+`--all` 每次调用后节流20ms，总时限180秒（外层200秒），配置上限4096、实际读取上限8192；超时/越界会停止，不绕过权限。
+非全局属性不猜area=0，缺失区域则跳过。输出 `CONFIGS`、每项 `ITEM` 或 `ERROR`，最后 `DONE` 汇总。
+`raw_preview` 支持数值、布尔、字符串和数组；字符串最多512字符、数组每层64项/深度2、总预览最多4096字符，
+超出标为 `[truncated]`，并非完整大对象导出。`DONE` 不等于全部成功，需查看 ok/unavailable/failed；
+若无一项可用返回3，配置/全局异常返回1。配置权限过滤意味着不可见属性不在覆盖范围内。
+
+默认模式每个关键步骤先输出 `BEGIN`；成功时应看到 `OK uid=2000`、一次 `OK connected_once`、
 5行 `SAMPLE`（均为 `status=0`、数值 `raw`）及最后 `PASS reads=5 connections=1`，退出码0。
 驻车 `raw=0` 是允许的，不需要开动车辆；不推断速度单位，`ts_ns` 保留 VHAL 原始时间戳。
 `connect_us` 不含 ART 启动，`read_us` 只量本次反射 getProperty 调用，不是端到端性能对比。
@@ -138,9 +152,14 @@ adb -s "$SERIAL" shell 'CLASSPATH=/system/framework/android.car.jar:/data/local/
 Java 自带15秒 watchdog，卡住时返回124并报告当前阶段；外层20秒限时也覆盖 ART 启动。
 若只看到外层超时/非零退出而没有 Java 的 FAIL 行，应先排查运行时启动或被系统终止，不能判定权限成功。
 
-本实验的 PASS **仅证明这台固件上 shell 经该接口能返回一个可用数值**，不证明 ECU 最新值、
+已在一台用户确认驻车的 Android API32 / 8295 车机以 UID2000 实测：默认5次车速读取成功；
+`--all` 返回1108配置，跳过276个非READ配置，尝试832项，458项返回status0可用值，
+374项抛IllegalArgumentException（未据此认定权限问题），全程约18.4秒后正常退出。
+本轮没有触发预览截断，没有提权、属性写入、APK安装或常驻进程；结果不能外推所有固件。
+
+本实验仅证明这台固件上 shell 经该接口可直接取到多类数值/字符串/数组，不证明 ECU 最新值、
 时钟归一、全部属性权限、常驻/休眠存活或负载收益；失败也只说明当前路径/属性没跑通，不证明所有方案不可行。
-日志包含车辆状态，请脱敏后再分享，不要直接入库。
+HAL dump还含历史事件，不能当作本轮实时读取。日志可能包含车辆/设备标识，请仅本机保留、脱敏后再分享，不要直接入库。
 
 ---
 
@@ -391,7 +410,7 @@ instrument/
 
 ## 六、已知限制
 
-- 最小取数探针仅作 #27 前置可行性实验，目标机权限/固件兼容性尚未验证；不等于已落地的常驻数据服务，也不降低现有 APK 轮询压力。
+- 最小取数探针已在一台API32/8295目标机验证shell直读458项，但374项配置读取仍抛异常、其它固件未验证；不等于已落地的常驻数据服务，也不降低现有 APK 轮询压力。
 - fb1 单缓冲 → 10fps 下仍有约每秒 1 次撕裂，非 bug。
 - 充电桩类型（直流/交流）要观察 120 秒会话峰值才下结论，前 2 分钟显示"未判定"。
 - `get_host_icm_charging_duration` 返回 `[-1,0,0]`，充电时长不可用。

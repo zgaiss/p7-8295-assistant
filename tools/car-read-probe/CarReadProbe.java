@@ -1,23 +1,102 @@
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
-/** One connection, one known property, five reads, then exit. No Android compile dependency. */
+/** One connection; five speed reads or one pass over declared readable configs. No Android compile dependency. */
 public final class CarReadProbe {
     private static volatile String stage = "runtime";
     private static void begin(String name) { stage = name; System.out.println("BEGIN " + name); }
     private static Object call(Class<?> type, String name, Object target) throws Exception {
         return type.getMethod(name).invoke(target);
     }
+    private static String preview(Object v, int depth) {
+        if (v == null) return "null";
+        if (v instanceof Number || v instanceof Boolean) return String.valueOf(v);
+        if (v.getClass().isArray() && depth < 2) {
+            int length = java.lang.reflect.Array.getLength(v);
+            StringBuilder b = new StringBuilder("[");
+            for (int i = 0; i < Math.min(length, 64); i++) {
+                String part = preview(java.lang.reflect.Array.get(v, i), depth + 1);
+                if (b.length() + part.length() + 17 > 4096) {
+                    if (i != 0) b.append(',');
+                    return b.append("\"[truncated]\"]").toString();
+                }
+                if (i != 0) b.append(',');
+                b.append(part);
+            }
+            if (length > 64) b.append(",\"[truncated]\"");
+            return b.append(']').toString();
+        }
+        String s = v instanceof String ? (String) v : "[type:" + v.getClass().getName() + "]";
+        if (s.length() > 512) s = s.substring(0, 512) + "[truncated]";
+        StringBuilder b = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' || c == '"') b.append('\\').append(c);
+            else if (c < 32 || Character.isSurrogate(c)) b.append(String.format("\\u%04x", (int) c));
+            else b.append(c);
+        }
+        return b.append('"').toString();
+    }
+    private static void readAll(Object api, Method read, Method status, Method timestamp, Method value) throws Exception {
+        begin("property_list");
+        Object list = read.getDeclaringClass().getMethod("getPropertyList").invoke(api);
+        if (!(list instanceof java.util.List)) throw new IllegalStateException("unsupported config list type");
+        java.util.List<?> configs = (java.util.List<?>) list;
+        System.out.println("CONFIGS count=" + configs.size());
+        if (configs.size() > 4096) throw new IllegalStateException("config limit 4096 exceeded");
+        Class<?> configType = Class.forName("android.car.hardware.CarPropertyConfig");
+        int attempted = 0, ok = 0, unavailable = 0, failed = 0, writeOnly = 0, noAreas = 0;
+        java.util.Set<String> seen = new java.util.HashSet<String>();
+        for (Object config : configs) {
+            int id = ((Number) call(configType, "getPropertyId", config)).intValue();
+            int access = ((Number) call(configType, "getAccess", config)).intValue();
+            if ((access & 1) == 0) { writeOnly++; continue; }
+            int[] areas = (int[]) call(configType, "getAreaIds", config);
+            if (areas.length == 0 && Boolean.TRUE.equals(call(configType, "isGlobalProperty", config))) areas = new int[]{0};
+            if (areas.length == 0) { noAreas++; continue; }
+            for (int area : areas) {
+                String key = String.format("id=0x%08x area=0x%x", id, area);
+                if (!seen.add(key)) continue;
+                if (++attempted > 8192) throw new IllegalStateException("read limit 8192 exceeded");
+                begin("all_" + key);
+                try {
+                    long start = System.nanoTime();
+                    Object result = read.invoke(api, id, area);
+                    long micros = (System.nanoTime() - start) / 1000;
+                    if (result == null) throw new IllegalStateException("null CarPropertyValue");
+                    int st = ((Number) status.invoke(result)).intValue();
+                    Object raw = st == 0 ? value.invoke(result) : null;
+                    boolean valid = st == 0 && raw != null
+                            && (!(raw instanceof Number) || Double.isFinite(((Number) raw).doubleValue()));
+                    System.out.println("ITEM " + key + " status=" + st + " ts_ns=" + timestamp.invoke(result)
+                            + " type=" + (raw == null ? "null" : raw.getClass().getName())
+                            + " raw_preview=" + preview(raw, 0) + " read_us=" + micros);
+                    if (valid) ok++; else unavailable++;
+                } catch (Exception e) {
+                    Throwable cause = e;
+                    while (cause instanceof InvocationTargetException && cause.getCause() != null) cause = cause.getCause();
+                    failed++;
+                    System.out.println("ERROR " + key + " error=" + cause.getClass().getName());
+                }
+                Thread.sleep(20);
+            }
+        }
+        System.out.println("DONE configs=" + configs.size() + " attempted=" + attempted + " ok=" + ok
+                + " unavailable=" + unavailable + " failed=" + failed + " skipped_non_read=" + writeOnly + " skipped_no_areas=" + noAreas);
+        if (ok == 0) System.exit(3);
+    }
     public static void main(String[] args) {
         if (args.length == 1 && "--help".equals(args[0])) {
-            System.out.println("CarReadProbe: shell UID2000; speed 0x21601225 area0; 5 reads at 1s; 15s limit.");
+            System.out.println("CarReadProbe: shell UID2000; default speed 5x/15s; --all reads declared readable configs once/180s.");
             return;
         }
-        if (args.length != 0) { System.err.println("Usage: CarReadProbe [--help]"); System.exit(2); }
+        boolean all = args.length == 1 && "--all".equals(args[0]);
+        if (args.length != 0 && !all) { System.err.println("Usage: CarReadProbe [--help|--all]"); System.exit(2); }
+        final int limit = all ? 180 : 15;
         Thread watchdog = new Thread(() -> {
-            try { Thread.sleep(15000); }
+            try { Thread.sleep(limit * 1000L); }
             catch (InterruptedException e) { return; }
-            System.err.println("FAIL timeout stage=" + stage + " limit_s=15");
+            System.err.println("FAIL timeout stage=" + stage + " limit_s=" + limit);
             System.exit(124);
         }, "probe-deadline");
         watchdog.setDaemon(true); watchdog.start();
@@ -51,6 +130,7 @@ public final class CarReadProbe {
             Object api = Class.forName(descriptor + "$Stub").getMethod("asInterface", ib).invoke(null, propertyBinder);
             Method read = Class.forName(descriptor).getMethod("getProperty", int.class, int.class);
             System.out.println("OK connected_once connect_us=" + (System.nanoTime() - connectStart) / 1000);
+            if (all) { readAll(api, read, status, timestamp, value); return; }
             boolean allValid = true;
             for (int i = 1; i <= 5; i++) {
                 begin("read_" + i);
