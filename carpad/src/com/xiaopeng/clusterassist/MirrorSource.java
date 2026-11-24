@@ -233,22 +233,41 @@ public final class MirrorSource {
         if (lease == this) lease = null;
     }
 
+    private boolean cancelledOnOwner() {
+        if (!closed && restorationEpoch == NATIVE_EPOCH.get()) return false;
+        closed = true;
+        closeOnOwner();
+        return true;
+    }
+
     private void openCamera() {
-        if (closed) { closeOnOwner(); return; }
+        if (cancelledOnOwner()) return;
         try {
             final CameraManager mgr = (CameraManager) ctx.getSystemService(Context.CAMERA_SERVICE);
             if (mgr == null) { fail("无 CameraManager"); return; }
             String[] ids = mgr.getCameraIdList();
             if (ids.length == 0) { fail("无相机设备"); return; }
             String id = pickId(ids);
+            if (cancelledOnOwner()) return;
             if (quad) {
                 avm = new MirrorAvmSession(new MirrorAvmSession.Control() {
                     @Override public int current() { return AvmMode.current(mgr); }
-                    @Override public boolean set(int mode) { return AvmMode.set(mgr, mode); }
+                    @Override public boolean set(int mode) {
+                        // Recheck after synchronous queries: native takeover may have arrived meanwhile.
+                        if (!restoreMode || restorationEpoch != NATIVE_EPOCH.get() || (mode == 8 && closed)) {
+                            return false;
+                        }
+                        return AvmMode.set(mgr, mode);
+                    }
                 });
-                avm.prepare();
+                if (!avm.prepare()) {
+                    fail("无法记录进入前 AVM 模式，不切换鱼眼");
+                    return;
+                }
             }
+            if (cancelledOnOwner()) return;
             CameraCharacteristics cc = mgr.getCameraCharacteristics(id);
+            if (cancelledOnOwner()) return;
             StreamConfigurationMap map = cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             if (map == null) { fail("无 StreamConfigurationMap"); return; }
             Size sz = pickSize(map.getOutputSizes(ImageFormat.YUV_420_888));
@@ -256,6 +275,7 @@ public final class MirrorSource {
             reader = ImageReader.newInstance(sz.getWidth(), sz.getHeight(), ImageFormat.YUV_420_888, 2);
             reader.setOnImageAvailableListener(listener, handler);
             Log.i(TAG, "打开相机 id=" + id + " " + sz + " side=" + side + " quad=" + quad);
+            if (cancelledOnOwner()) return;
             opening = true;
             mgr.openCamera(id, callback, handler);
             handler.postDelayed(new Runnable() {
