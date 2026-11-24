@@ -95,6 +95,53 @@ python3 tools/build_version.py prepare --out /tmp/p7-instrument-build
 从仓库根目录执行 `sh tests/run-camera-tests.sh`（需要 Python 3、JDK）。
 测试覆盖授权状态、反射参数/返回值、一次性模式快照/还原、倒挡及未知挡位门控与 Camera2 延迟回调；Android fake 不是实车 HAL。
 
+### 最小取数可行性实验（#36，#27 的前置验证）
+
+`tools/car-read-probe/CarReadProbe.java` 是独立单文件探针，不依赖完整代理或 APK。
+以 shell UID2000 启动一次 `app_process`，只连接一次 `car_service → property`，
+固定读取 Issue #27 已给出的车速属性 `0x21601225`、area=0，共5次、间隔1秒后退出。
+没有端口、缓存、后台服务、守护、自动重连或属性扫描，不改变现有 App 轮询。
+
+主机依赖 Python 3、JDK（可用 `JAVA_HOME` 指定）及 Android SDK 的 d8/android.jar；
+SDK 取 `ANDROID_SDK_ROOT` / `ANDROID_HOME`，也可通过构建脚本 `--sdk` 指定。
+从仓库根目录构建和离线测试：
+
+```sh
+python3 tools/car-read-probe/build.py
+python3 tools/car-read-probe/test_probe.py
+```
+
+产物是已忽略的 `dist/car-read-probe/car-read-probe.jar`，仅含 dex，最低 Android API28。
+主机测试使用临时假 Android 类，只验证反射调用契约、错误定位和限时退出，不代表实车可用。
+
+**以下是待人工驻车执行的命令，本轮未连接车辆、未执行这些设备操作。**
+先选择自己已授权的目标，确认 `id` 为 uid=2000(shell)，不要 `adb root`；
+目标还须有 `/system/framework/android.car.jar`、`app_process` 和 toybox timeout。
+上传只涉及独立临时 jar，不安装 APK、不修改系统；不要同时重复运行此实验。
+
+```sh
+SERIAL='替换为已授权设备序列号'
+adb -s "$SERIAL" shell id
+adb -s "$SERIAL" push dist/car-read-probe/car-read-probe.jar /data/local/tmp/p7-car-read-probe.jar
+adb -s "$SERIAL" shell 'CLASSPATH=/system/framework/android.car.jar:/data/local/tmp/p7-car-read-probe.jar toybox timeout 20 app_process /system/bin CarReadProbe'
+```
+
+每个关键步骤先输出 `BEGIN`；成功时应看到 `OK uid=2000`、一次 `OK connected_once`、
+5行 `SAMPLE`（均为 `status=0`、数值 `raw`）及最后 `PASS reads=5 connections=1`，退出码0。
+驻车 `raw=0` 是允许的，不需要开动车辆；不推断速度单位，`ts_ns` 保留 VHAL 原始时间戳。
+`connect_us` 不含 ART 启动，`read_us` 只量本次反射 getProperty 调用，不是端到端性能对比。
+
+失败时保留完整终端输出及退出码，先看 `FAIL stage=`：`uid` 是运行身份/Android环境，
+`classes` 是类加载或签名，`car_service` / `property_service` 是服务发现/访问，
+`property_interface` 是描述符或反射方法，`read_N` 是属性读取（如权限拒绝、Binder异常、null返回）。
+`status!=0` 时不读无效 value，5次结束返回3且没有 PASS；其它异常返回1，参数错误返回2。
+Java 自带15秒 watchdog，卡住时返回124并报告当前阶段；外层20秒限时也覆盖 ART 启动。
+若只看到外层超时/非零退出而没有 Java 的 FAIL 行，应先排查运行时启动或被系统终止，不能判定权限成功。
+
+本实验的 PASS **仅证明这台固件上 shell 经该接口能返回一个可用数值**，不证明 ECU 最新值、
+时钟归一、全部属性权限、常驻/休眠存活或负载收益；失败也只说明当前路径/属性没跑通，不证明所有方案不可行。
+日志包含车辆状态，请脱敏后再分享，不要直接入库。
+
 ---
 
 ## 三、充电动画：为什么用"本地播放器"而不是推帧
@@ -296,7 +343,7 @@ build-all.sh       一键构建（自动适配 macOS / Windows）：测试 → �
 carpad/            车机 Android App
 instrument/        仪表端 Go 守护进程
 tests/             相机授权、AVM 参数与 Camera2 生命周期主机回归
-tools/             addzip.py、gen_bgmap.py、仪表诊断脚本（icrpc/icrpc_put/probe_card）与 testkey/
+tools/             addzip.py、gen_bgmap.py、仪表诊断脚本（icrpc/icrpc_put/probe_card）、car-read-probe/ 最小取数实验与 testkey/
 .gitignore         忽略 dist/、carpad/build/、字体、工具链
 ```
 
@@ -344,6 +391,7 @@ instrument/
 
 ## 六、已知限制
 
+- 最小取数探针仅作 #27 前置可行性实验，目标机权限/固件兼容性尚未验证；不等于已落地的常驻数据服务，也不降低现有 APK 轮询压力。
 - fb1 单缓冲 → 10fps 下仍有约每秒 1 次撕裂，非 bug。
 - 充电桩类型（直流/交流）要观察 120 秒会话峰值才下结论，前 2 分钟显示"未判定"。
 - `get_host_icm_charging_duration` 返回 `[-1,0,0]`，充电时长不可用。
