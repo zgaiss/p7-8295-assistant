@@ -161,13 +161,75 @@ public class MainActivity extends Activity {
                 && !shouldShowRequestPermissionRationale(android.Manifest.permission.CAMERA);
     }
 
+    private void adbGrantCamera(final boolean enableAfter) {
+        toast("正在通过本地 ADB 授权相机，如弹窗请点允许");
+        final String pkg = getPackageName();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                boolean granted = false;
+                try {
+                    LocalAdb.shell(MainActivity.this, "pm grant " + pkg + " android.permission.CAMERA", 30000);
+                    granted = checkSelfPermission(android.Manifest.permission.CAMERA)
+                            == android.content.pm.PackageManager.PERMISSION_GRANTED;
+                } catch (Throwable ignored) { }
+                final boolean ok = granted;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (!permissionActivityAlive()) return;
+                        refreshPermissionStatus();
+                        if (ok) {
+                            if (enableAfter) applyMirrorEnabled(true);
+                            else toast("相机权限已通过本地 ADB 授予；授权操作不会开启影像");
+                        } else {
+                            toast("本地 ADB 授权失败，请先在「连接仪表」页完成 ADB 授权");
+                            handleCameraAction(enableAfter
+                                    ? cameraPermission.enable(false, cameraPermanentlyDenied())
+                                    : cameraPermission.authorize(false, cameraPermanentlyDenied()));
+                        }
+                    }
+                });
+            }
+        }, "p7-adb-grant-camera").start();
+    }
+
+    private void adbGrantOverlay(final boolean enableAfter) {
+        toast("正在通过本地 ADB 授权悬浮窗，如弹窗请点允许");
+        final String pkg = getPackageName();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                boolean granted = false;
+                try {
+                    LocalAdb.shell(MainActivity.this, "appops set " + pkg + " SYSTEM_ALERT_WINDOW allow", 30000);
+                    granted = Settings.canDrawOverlays(MainActivity.this);
+                } catch (Throwable ignored) { }
+                final boolean ok = granted;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (!permissionActivityAlive()) return;
+                        refreshPermissionStatus();
+                        if (ok) {
+                            if (enableAfter) applyOverlayEnabled(true);
+                            else toast("悬浮窗权限已通过本地 ADB 授予；授权操作不会开启输出");
+                        } else {
+                            toast("本地 ADB 授权失败，请先在「连接仪表」页完成 ADB 授权");
+                        }
+                    }
+                });
+            }
+        }, "p7-adb-grant-overlay").start();
+    }
+
     private void requestMirrorEnable() {
         if (!permissionActivityAlive()) return;
         // 一次只允许一个权限事务持有设置返回意图，避免消费另一个设置页的返回。
         overlayPermission.disable();
         dismissOverlaySettingsDialog();
         if (swMirror != null) swMirror.setCheckedSilently(prefs.mirror);
-        handleCameraAction(cameraPermission.enable(hasCameraPermission(), cameraPermanentlyDenied()));
+        if (!hasCameraPermission()) {
+            adbGrantCamera(true);
+            return;
+        }
+        handleCameraAction(cameraPermission.enable(true, cameraPermanentlyDenied()));
     }
 
     private void requestCameraAuthorization() {
@@ -175,7 +237,11 @@ public class MainActivity extends Activity {
         overlayPermission.disable();
         dismissOverlaySettingsDialog();
         dismissCameraSettingsDialog();
-        handleCameraAction(cameraPermission.authorize(hasCameraPermission(), cameraPermanentlyDenied()));
+        if (!hasCameraPermission()) {
+            adbGrantCamera(false);
+            return;
+        }
+        handleCameraAction(cameraPermission.authorize(true, cameraPermanentlyDenied()));
     }
 
     private void applyMirrorEnabled(boolean enabled) {
@@ -311,8 +377,12 @@ public class MainActivity extends Activity {
             toast("请先开启「启用打灯影像」；悬浮窗不会自动打开总开关");
             return;
         }
-        handleOverlayAction(enable ? overlayPermission.enable(hasOverlayPermission(), true)
-                : overlayPermission.authorize(hasOverlayPermission(), true));
+        if (!hasOverlayPermission()) {
+            adbGrantOverlay(enable);
+            return;
+        }
+        handleOverlayAction(enable ? overlayPermission.enable(true, true)
+                : overlayPermission.authorize(true, true));
     }
 
     private void handleOverlayAction(CameraPermissionState.Action action) {
