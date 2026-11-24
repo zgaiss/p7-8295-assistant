@@ -13,6 +13,10 @@
 
 两边通过 **仪表侧 FTP（172.20.1.40:2221，root/空密码，chroot 在 /data）** 和 **30510 管理通道**交换数据。
 
+`tools/carprobe/` 是独立的**开发/调试工具原型**：在车机 shell 身份下常驻一个只读采集进程，
+多个客户端共用缓存，避免每请求冷启动 `app_process`。它没有接入 APK 或仪表链路，
+因此不会减少当前 App 的盲区/打灯轮询，也不替代上述 FTP/30510 通道。
+
 ---
 
 ## 二、构建
@@ -94,6 +98,65 @@ python3 tools/build_version.py prepare --out /tmp/p7-instrument-build
 
 从仓库根目录执行 `sh tests/run-camera-tests.sh`（需要 Python 3、JDK）。
 测试覆盖授权状态、反射参数/返回值、一次性模式快照/还原、倒挡及未知挡位门控与 Camera2 延迟回调；Android fake 不是实车 HAL。
+
+### 开发侧车辆数据代理（#27，实验原型）
+
+#### 构建与离线验证
+
+依赖 Python 3、JDK（Java 8 源码兼容）、Android SDK 的 build-tools/d8 和 android.jar。
+SDK 从 `ANDROID_SDK_ROOT` / `ANDROID_HOME` 读取，macOS 默认 `~/Library/Android/sdk`。
+从仓库根目录执行：
+
+```sh
+sh tools/carprobe/build.sh
+python3 -m unittest discover -s tools/carprobe/tests -v
+sh tools/carprobe/deploy.sh --help
+python3 tools/carprobe/carprobe.py --help
+```
+
+产物在已忽略的 `dist/carprobe/carprobe.jar`，只含 dex；不打进 APK、不修改版本或预编译仪表资产。
+测试使用主机 Java/假属性源和模拟 adb，不证明车机隐藏 API、SELinux 或 VHAL 的兼容性。
+
+#### 驻车试验流程（需人工选择已授权设备）
+
+部署依赖主机 adb 和目标机的 `setsid`、`app_process`、`android.car.jar`、toybox 的 timeout/nc 及常规 shell 工具。
+脚本拒绝非 shell UID 2000（包括 adb root）；已有生命周期锁不会自动清理，异常中断后需先人工检查。
+部署脚本只接受显式 `--serial`，不自动搜索、连接设备或操作 adb server。先检查目标设备，
+通过 `deploy.sh --serial <序列号> start` 部署并拉起，之后执行同脚本的 `forward` 子命令。
+这两个操作仅在人工试验时执行，本轮未在车辆上执行。
+默认设备端口和本机 forward 端口均为 17666；`forward` 使用 `--no-rebind`，不会覆盖已有转发。
+
+客户端直连本机 TCP，不读取 HTTP_PROXY 等环境变量。`carprobe.py ping` / `snapshot` / `list` /
+`get speed` 各读取一次缓存；`stream --count 10` 读取十条推送（不带 count 持续读取）。
+`--port` 和 `--timeout` 可配置，每次连接/读取均有限时，客户端单条 JSON 上限 2MiB。
+stream 在采集轮次不变时也每秒推送缓存心跳，以更新诊断年龄并回收断开的客户端；心跳不触发 Binder。
+HTTP GET `/snapshot`、`/speed`、`/ping`、
+`/list` 也只读取内存；不支持通过 HTTP 修改属性或配置。
+
+`deploy.sh --serial <序列号> status` 仅检查进程；`stop` 发送 TERM 前校验 PID 与进程身份，
+不会按裸 PID 杀其它程序。停止后数据端口关闭，已有 adb forward 可由用户按需移除。
+部署目录固定为 shell 可写的 `/data/local/tmp/p7-carprobe`，包含 jar、PID、每次启动截断的运行日志和生命周期锁；
+启动使用 `setsid` 并重定向 stdin/stdout/stderr，不依赖 adb shell 会话继续存活。
+**这不等于休眠保活**：目标固件可按 shell UID 回收进程，休眠后可能需要人工重启；没有自动守护或开机自启。
+
+#### 缓存与时钟语义
+
+单采集器每轮读取一次属性表，默认周期 1000ms（不允许更快），慢采集不补跑积压轮次。
+多个快照请求不增加 Binder 读取次数；单属性失败不会中断其它属性。
+`seq` 统计采集轮次而不是请求次数；`conn` 统计成功建立属性服务连接次数，不代表车辆唤醒次数。
+`sampling` 表示一轮正在执行，`sample_age_ms` 是距最近完成一轮的本地单调年龄，`poll_ms` 是该轮耗时；
+Binder 卡住时仍可读取旧缓存和增长的年龄，不会强制取消事务，也不能以 ping 成功代替数据健康检查。
+
+- `v` / `ts` / `st`：最近一次成功且状态可用的原始值、VHAL 时间戳、状态；不猜测挡位/门/安全带枚举或速度单位。
+- `latest_ok` / `latest_error` / `latest_st`：最近采集结果；失败时保留旧值用于诊断，不能把旧值视为当前有效值。
+- `read_age_ms`：本地单调时钟计算的距最近一次成功读取的时间；初始无成功值时为 null。
+  使用方须结合 `latest_ok`、状态、自己的 TTL 判断可用性；Binder 读成功也不保证 ECU 刚更新过。
+- `age_ms`：VHAL 原始时间戳与车机时钟之差，**仅作时钟偏移诊断，不用其绝对值判断新鲜度**。
+- `chg_ms`：值内容多久没有变化；数组按内容比较。停车时长期不变是正常情况，不等于数据过期。
+
+仅收录 Issue 明确列出 ID 的属性，不补猜缺失的行程字段；`list` 是本原型实际采集表。
+`raw` / `log` / `applog`、派生里程、历史轨迹、LAN 监听均未实现并拒绝请求。
+本原型只读本机缓存，无法通过它在客户端注册新的采集属性。
 
 ---
 
@@ -296,7 +359,7 @@ build-all.sh       一键构建（自动适配 macOS / Windows）：测试 → �
 carpad/            车机 Android App
 instrument/        仪表端 Go 守护进程
 tests/             相机授权、AVM 参数与 Camera2 生命周期主机回归
-tools/             addzip.py、gen_bgmap.py、仪表诊断脚本（icrpc/icrpc_put/probe_card）与 testkey/
+tools/             addzip.py、gen_bgmap.py、仪表诊断脚本（icrpc/icrpc_put/probe_card）、carprobe/ 开发侧数据代理与 testkey/
 .gitignore         忽略 dist/、carpad/build/、字体、工具链
 ```
 
@@ -344,6 +407,8 @@ instrument/
 
 ## 六、已知限制
 
+- carprobe 为开发侧原型，尚未验证目标车机的 shell 隐藏 API/Binder 权限、属性语义、休眠回收和真实 CPU/时延；不能沿用 Issue 中另一版本的实测数字作为本实现的性能结论。
+- carprobe 仅监听 loopback，无认证；设备上其它本地进程或有 adb 授权的人可读取缓存，包含车辆状态等隐私数据。不要转发到公网/局域网，不要把快照或设备日志直接入库。
 - fb1 单缓冲 → 10fps 下仍有约每秒 1 次撕裂，非 bug。
 - 充电桩类型（直流/交流）要观察 120 秒会话峰值才下结论，前 2 分钟显示"未判定"。
 - `get_host_icm_charging_duration` 返回 `[-1,0,0]`，充电时长不可用。
