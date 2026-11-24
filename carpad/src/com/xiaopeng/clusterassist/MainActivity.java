@@ -47,6 +47,7 @@ public class MainActivity extends Activity {
     private final CameraPermissionState cameraPermission = new CameraPermissionState();
     private AlertDialog cameraSettingsDialog, overlaySettingsDialog;
     private final CameraPermissionState overlayPermission = new CameraPermissionState();
+    private int cameraGrantSeq, overlayGrantSeq;
     private TextView tvCameraPermission, tvOverlayPermission;
     private PillSwitch swMirrorOverlay;
     private boolean permissionActivityDestroyed;
@@ -162,6 +163,7 @@ public class MainActivity extends Activity {
     }
 
     private void adbGrantCamera(final boolean enableAfter) {
+        final int seq = ++cameraGrantSeq;
         toast("正在通过本地 ADB 授权相机，如弹窗请点允许");
         final String pkg = getPackageName();
         new Thread(new Runnable() {
@@ -175,7 +177,7 @@ public class MainActivity extends Activity {
                 final boolean ok = granted;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        if (!permissionActivityAlive()) return;
+                        if (!permissionActivityAlive() || seq != cameraGrantSeq) return;
                         refreshPermissionStatus();
                         if (ok) {
                             if (enableAfter) applyMirrorEnabled(true);
@@ -193,6 +195,7 @@ public class MainActivity extends Activity {
     }
 
     private void adbGrantOverlay(final boolean enableAfter) {
+        final int seq = ++overlayGrantSeq;
         toast("正在通过本地 ADB 授权悬浮窗，如弹窗请点允许");
         final String pkg = getPackageName();
         new Thread(new Runnable() {
@@ -205,7 +208,7 @@ public class MainActivity extends Activity {
                 final boolean ok = granted;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        if (!permissionActivityAlive()) return;
+                        if (!permissionActivityAlive() || seq != overlayGrantSeq) return;
                         refreshPermissionStatus();
                         if (ok) {
                             if (enableAfter) applyOverlayEnabled(true);
@@ -221,6 +224,7 @@ public class MainActivity extends Activity {
 
     private void requestMirrorEnable() {
         if (!permissionActivityAlive()) return;
+        cameraGrantSeq++;
         // 一次只允许一个权限事务持有设置返回意图，避免消费另一个设置页的返回。
         overlayPermission.disable();
         dismissOverlaySettingsDialog();
@@ -234,6 +238,7 @@ public class MainActivity extends Activity {
 
     private void requestCameraAuthorization() {
         if (!permissionActivityAlive()) return;
+        cameraGrantSeq++;
         overlayPermission.disable();
         dismissOverlaySettingsDialog();
         dismissCameraSettingsDialog();
@@ -359,6 +364,7 @@ public class MainActivity extends Activity {
 
     private void applyOverlayEnabled(boolean enabled) {
         if (!permissionActivityAlive()) return;
+        if (!enabled) overlayGrantSeq++;
         // 两个权限事务互不代替：悬浮授权绝不开启总开关，也不代替相机授权。
         prefs.mirrorOverlay = enabled && prefs.mirror && hasCameraPermission() && hasOverlayPermission();
         prefs.save(this);
@@ -369,6 +375,7 @@ public class MainActivity extends Activity {
 
     private void requestOverlay(boolean enable) {
         if (!permissionActivityAlive()) return;
+        overlayGrantSeq++;
         cameraPermission.disable();
         dismissCameraSettingsDialog();
         if (!enable) dismissOverlaySettingsDialog();
