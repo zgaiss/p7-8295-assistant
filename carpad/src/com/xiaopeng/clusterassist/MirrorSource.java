@@ -2,7 +2,6 @@ package com.xiaopeng.clusterassist;
 
 import android.content.Context;
 import android.graphics.ImageFormat;
-import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
@@ -20,12 +19,12 @@ import android.view.Surface;
 import java.nio.ByteBuffer;
 
 /**
- * 打灯影像的采集端：Camera2 取 YUV_420_888 → 最近邻采样成 960×540 RGB565 → 交给 MirrorPush。
+ * 打灯影像的采集端：Camera2 取 YUV_420_888 → 最近邻采样成 640×360 RGB565 → 交给 MirrorPush。
  *
  * <p>为什么不直接拿原厂 AVM 的画面：那条路只有两条，<br>
  * ① 让原厂 AVM 把画面渲染到我们的 Surface —— 没有公开接口，拿不到；<br>
  * ② 抓 SurfaceFlinger/display 层 —— 需要系统权限，且会与仪表写 fb1 抢时序。<br>
- * 所以走 Camera2 物理相机，这也是另一套打灯影像实现（P7_ViewAssist）在实车上验证过的路径。</p>
+ * 所以走 Camera2 合成相机流，与参考实现 P7_ViewAssist 使用同一路径。</p>
  *
  * <p>采样与转换在一趟里做完：每个输出像素 (x,y) 按比例取源像素 (sx,sy)，
  * 顺便算 565。这样不需要额外的缩放库，也不需要中间 Bitmap。</p>
@@ -119,17 +118,33 @@ public final class MirrorSource {
     private final Context ctx;
     private final int cameraId;
     private final int side;
-    /** true = 取打灯侧的广角视野（ROI 裁切）；false = 整幅 360 画面。 */
-    private final boolean crop;
-    /**
-     * true = 相机流是 2×2 四宫格鱼眼，按象限裁（左灯取左下、右灯取右下）；
-     * false = 相机流是 360 三分屏，走 {@link #crop} 的侧栏 ROI。
-     */
+    /** Request quad mode and gate frames on parameter readback; otherwise pass the manual stream through. */
     private final boolean quad;
     private final MirrorPush push;
 
-    private HandlerThread thread;
-    private Handler handler;
+    // One process-wide owner survives stop() to drain late HAL callbacks. Never quit it
+    // while an asynchronous open/close can still deliver a CameraDevice.
+    private static final Handler OWNER;
+    private static MirrorSource lease;
+    private static final java.util.concurrent.atomic.AtomicLong NATIVE_EPOCH =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final long restorationEpoch = NATIVE_EPOCH.get();
+
+    /** Invalidate even an old source whose asynchronous stop was already queued. */
+    public static void yieldToNative() { NATIVE_EPOCH.incrementAndGet(); }
+    static {
+        HandlerThread ownerThread = new HandlerThread("p7mirror-cam");
+        ownerThread.start();
+        OWNER = new Handler(ownerThread.getLooper());
+    }
+    private final Handler handler = OWNER;
+    private boolean opening;
+    private boolean configuring;
+    private MirrorAvmSession avm;
+    private volatile boolean restoreMode = true;
+    private long readyAt;
+    private long modeCheckAt;
+    private int modeChecks;
     private CameraDevice device;
     private CameraCaptureSession session;
     private ImageReader reader;
@@ -146,11 +161,10 @@ public final class MirrorSource {
     private volatile boolean closed;
     private volatile String lastError = "";
 
-    public MirrorSource(Context ctx, int cameraId, int side, boolean crop, boolean quad, MirrorPush push) {
+    public MirrorSource(Context ctx, int cameraId, int side, boolean quad, MirrorPush push) {
         this.ctx = ctx.getApplicationContext();
         this.cameraId = cameraId;
         this.side = side;
-        this.crop = crop;
         this.quad = quad;
         this.push = push;
     }
@@ -158,72 +172,111 @@ public final class MirrorSource {
     public String lastError() { return lastError; }
 
     public void start() {
-        try {
-            thread = new HandlerThread("p7mirror-cam");
-            thread.start();
-            handler = new Handler(thread.getLooper());
-            handler.post(new Runnable() {
-                @Override public void run() { openCamera(); }
-            });
-        } catch (Throwable t) {
-            lastError = "启动失败: " + t;
-            Log.w(TAG, lastError);
-        }
+        final long deadline = android.os.SystemClock.elapsedRealtime() + 3000;
+        handler.post(new Runnable() {
+            @Override public void run() {
+                if (closed) return;
+                if (lease != null && lease != MirrorSource.this) {
+                    if (android.os.SystemClock.elapsedRealtime() >= deadline) {
+                        fail("上一相机会话尚未关闭，暂停影像");
+                    } else {
+                        handler.postDelayed(this, 100);
+                    }
+                    return;
+                }
+                lease = MirrorSource.this;
+                openCamera();
+            }
+        });
     }
 
-    public void stop() {
+    public boolean isStopped() { return closed; }
+
+    public void stop() { stop(true); }
+
+    public void stop(boolean restore) {
+        if (!restore) restoreMode = false;
+        closed = true; // Immediately invalidate queued open/configure/frame callbacks.
+        handler.post(new Runnable() {
+            @Override public void run() {
+                closeOnOwner();
+            }
+        });
+    }
+
+    private void fail(String error) {
+        lastError = error;
+        Log.w(TAG, error);
         closed = true;
+        closeOnOwner();
+    }
+
+    private void closeOnOwner() {
+        readyAt = 0;
+        if (avm != null) {
+            if (restoreMode && restorationEpoch == NATIVE_EPOCH.get()) avm.close();
+            avm = null;
+        }
         try {
             if (session != null) { session.close(); session = null; }
         } catch (Throwable ignored) { }
-        try {
-            if (device != null) { device.close(); device = null; }
-        } catch (Throwable ignored) { }
-        try {
-            if (reader != null) { reader.close(); reader = null; }
-        } catch (Throwable ignored) { }
-        try {
-            if (thread != null) { thread.quitSafely(); thread = null; }
-        } catch (Throwable ignored) { }
-    }
-
-    private void openCamera() {
-        if (closed) return;
-        try {
-            CameraManager mgr = (CameraManager) ctx.getSystemService(Context.CAMERA_SERVICE);
-            if (mgr == null) { lastError = "无 CameraManager"; return; }
-            String[] ids = mgr.getCameraIdList();
-            if (ids.length == 0) { lastError = "无相机设备"; return; }
-            String id = pickId(ids);
-            CameraCharacteristics cc = mgr.getCameraCharacteristics(id);
-            StreamConfigurationMap map =
-                    cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-            if (map == null) { lastError = "无 StreamConfigurationMap"; return; }
-            Size sz = pickSize(map.getOutputSizes(ImageFormat.YUV_420_888));
-            if (sz == null) { lastError = "无可用 YUV 尺寸"; return; }
-
-            reader = ImageReader.newInstance(sz.getWidth(), sz.getHeight(),
-                    ImageFormat.YUV_420_888, 2);
-            reader.setOnImageAvailableListener(listener, handler);
-            Log.i(TAG, "打开相机 id=" + id + " " + sz.getWidth() + "x" + sz.getHeight()
-                    + " → " + OUT_W + "x" + OUT_H + " side=" + side);
-            mgr.openCamera(id, callback, handler);
-        } catch (CameraAccessException | SecurityException e) {
-            lastError = "打开相机失败: " + e;
-            Log.w(TAG, lastError);
-        } catch (Throwable t) {
-            lastError = "打开相机异常: " + t;
-            Log.w(TAG, lastError);
+        if (device != null) {
+            // Keep reader/surface and lease alive until the matching onClosed.
+            try { device.close(); } catch (Throwable t) { Log.w(TAG, "等待相机关闭: " + t); }
+        } else if (!opening) {
+            releaseReader();
         }
     }
 
-    /** 指定的 id 不在列表里（换固件/换车）就退回第一路，别让功能整体失效。 */
+    private void releaseReader() {
+        if (reader != null) { reader.close(); reader = null; }
+        if (lease == this) lease = null;
+    }
+
+    private void openCamera() {
+        if (closed) { closeOnOwner(); return; }
+        try {
+            final CameraManager mgr = (CameraManager) ctx.getSystemService(Context.CAMERA_SERVICE);
+            if (mgr == null) { fail("无 CameraManager"); return; }
+            String[] ids = mgr.getCameraIdList();
+            if (ids.length == 0) { fail("无相机设备"); return; }
+            String id = pickId(ids);
+            if (quad) {
+                avm = new MirrorAvmSession(new MirrorAvmSession.Control() {
+                    @Override public int current() { return AvmMode.current(mgr); }
+                    @Override public boolean set(int mode) { return AvmMode.set(mgr, mode); }
+                });
+                avm.prepare();
+            }
+            CameraCharacteristics cc = mgr.getCameraCharacteristics(id);
+            StreamConfigurationMap map = cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            if (map == null) { fail("无 StreamConfigurationMap"); return; }
+            Size sz = pickSize(map.getOutputSizes(ImageFormat.YUV_420_888));
+            if (sz == null) { fail("无可用 YUV 尺寸"); return; }
+            reader = ImageReader.newInstance(sz.getWidth(), sz.getHeight(), ImageFormat.YUV_420_888, 2);
+            reader.setOnImageAvailableListener(listener, handler);
+            Log.i(TAG, "打开相机 id=" + id + " " + sz + " side=" + side + " quad=" + quad);
+            opening = true;
+            mgr.openCamera(id, callback, handler);
+            handler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    // Timeout invalidates the intent, never the pending HAL ownership.
+                    if (!closed && opening) fail("等待相机打开超时，保留关闭屏障");
+                }
+            }, 3000);
+        } catch (Throwable t) {
+            opening = false;
+            fail("打开相机失败: " + t);
+        }
+    }
+
     private String pickId(String[] ids) {
         String want = String.valueOf(cameraId);
         for (String id : ids) if (id.equals(want)) return id;
-        lastError = "相机 id=" + want + " 不存在，退回 " + ids[0];
-        Log.w(TAG, lastError);
-        return ids[0];
+        // ViewAssist maps AVM command channel 0 to the first exposed stream.
+        // A missing manually selected camera must NOT silently show another view.
+        if (quad) return ids[0];
+        throw new IllegalArgumentException("配置的相机不存在: " + want);
     }
 
     /**
@@ -252,50 +305,94 @@ public final class MirrorSource {
 
     private final CameraDevice.StateCallback callback = new CameraDevice.StateCallback() {
         @Override public void onOpened(CameraDevice d) {
+            opening = false;
             device = d;
-            startSession();
+            if (closed || lease != MirrorSource.this) { d.close(); return; }
+            if (quad) {
+                if (avm == null || !avm.activate()) {
+                    fail("AVM 四宫格下发失败，不推送旧视角: " + AvmMode.lastError());
+                    return;
+                }
+                awaitMode();
+            } else {
+                startSession();
+            }
         }
 
         @Override public void onDisconnected(CameraDevice d) {
-            lastError = "相机被判连（可能被原厂 AVM 抢占）";
-            Log.w(TAG, lastError);
-            d.close();
-            device = null;
+            opening = false;
+            device = d;
+            restoreMode = false; // Native AVM is taking ownership; never overwrite it.
+            fail("相机断开（可能被原厂 AVM 抢占）");
         }
 
         @Override public void onError(CameraDevice d, int code) {
-            lastError = "相机错误 code=" + code;
-            Log.w(TAG, lastError);
-            d.close();
+            opening = false;
+            device = d;
+            fail("相机错误 code=" + code);
+        }
+
+        @Override public void onClosed(CameraDevice d) {
+            if (device != d) return;
             device = null;
+            opening = false;
+            releaseReader();
         }
     };
 
+    private void awaitMode() {
+        if (closed) return;
+        if (avm != null && avm.ready()) {
+            // Readback is a parameter-level check, NOT proof of optical content.
+            // Also allow queued frames from the old composition to drain.
+            readyAt = android.os.SystemClock.elapsedRealtime() + 250;
+            startSession();
+        } else if (++modeChecks < 10) {
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { awaitMode(); }
+            }, 100);
+        } else {
+            fail("AVM 模式读回未确认四宫格，停止影像: " + AvmMode.lastError());
+        }
+    }
+
     private void startSession() {
+        if (closed || device == null || reader == null) return;
+        final CameraDevice owner = device;
         try {
-            CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            CaptureRequest.Builder b = owner.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             Surface surface = reader.getSurface();
             b.addTarget(surface);
-            device.createCaptureSession(java.util.Collections.singletonList(surface),
+            configuring = true;
+            handler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (!closed && configuring && device == owner) fail("等待相机会话配置超时");
+                }
+            }, 3000);
+            owner.createCaptureSession(java.util.Collections.singletonList(surface),
                     new CameraCaptureSession.StateCallback() {
                         @Override public void onConfigured(CameraCaptureSession s) {
+                            configuring = false;
+                            if (closed || device != owner || lease != MirrorSource.this) {
+                                s.close();
+                                return;
+                            }
                             session = s;
                             try {
                                 s.setRepeatingRequest(b.build(), null, handler);
                             } catch (Throwable t) {
-                                lastError = "下发预览请求失败: " + t;
-                                Log.w(TAG, lastError);
+                                fail("下发预览请求失败: " + t);
                             }
                         }
 
                         @Override public void onConfigureFailed(CameraCaptureSession s) {
-                            lastError = "createCaptureSession 配置失败";
-                            Log.w(TAG, lastError);
+                            configuring = false;
+                            s.close();
+                            if (!closed && device == owner) fail("createCaptureSession 配置失败");
                         }
                     }, handler);
         } catch (Throwable t) {
-            lastError = "建会话失败: " + t;
-            Log.w(TAG, lastError);
+            fail("建会话失败: " + t);
         }
     }
 
@@ -306,14 +403,26 @@ public final class MirrorSource {
             Image img = null;
             try {
                 img = r.acquireLatestImage();
-                if (img == null) return;
+                if (img == null || closed) return;
+                if (quad) {
+                    long clock = android.os.SystemClock.elapsedRealtime();
+                    if (clock < readyAt) return;
+                    if (clock - modeCheckAt >= 200) {
+                        modeCheckAt = clock;
+                        if (avm == null || !avm.ready()) {
+                            restoreMode = false;
+                            fail("AVM 模式已被其他影像接管，停止推帧");
+                            return;
+                        }
+                    }
+                }
                 long now = System.currentTimeMillis();
                 if (now - lastFrameAt < 1000 / TARGET_FPS) return;
                 lastFrameAt = now;
                 long t0 = System.currentTimeMillis();
                 convert(img);
                 statConvertMs += System.currentTimeMillis() - t0;
-                push.submit(out, side);
+                if (!closed) push.submit(out, side);
                 statFrames++;
                 if (now - statAt >= 1000) {
                     Log.i(TAG, "capture " + statFrames + "fps convert="
@@ -381,21 +490,8 @@ public final class MirrorSource {
         }
     }
 
-    /**
-     * 采样表：输出 x/y → 源 x/y。只在源尺寸变化时重建一次。
-     *
-     * <p>默认把整幅源画面等比映射到输出。开启侧视裁切时，改为从 360 三分屏里
-     * 取打灯那一侧的 16:9 子窗口，等比放大——保持宽高比，绝不拉伸。
-     *
-     * <p>为什么要这样做：另一套已实车验证的打灯影像（P7打灯转向辅助 v1.46）
-     * 走的是「下发裸 display-mode=8 让相机服务切出四路鱼眼，再用 cam_scale 放大
-     * + pan 平移把该侧露出来」。本车固件 V5.10.0.8814 上，display-mode 能否生效
-     * 取决于下发是否只写裸字段（补配套字段反而让 controller 不触发，见 AvmMode）。
-     * quad=true 表示四宫格已生效 → 按象限裁；否则把整幅 1280×720 按侧栏 ROI
-     * 放大裁切兜底，两条路都不拉伸画面。</p>
-     *
-     * <p>1280×724 实测分区（逐列亮度定位分隔线）：左栏 0..395、中栏 400..879
-     * （车身俯视）、右栏 884..1279，分隔线在 396..399 与 880..883。</p>
+    /** Output-to-source sampling map. Quad ROI is used only behind the AVM session gate.
+     * Firmware must still be checked for correct physical left/right mapping on a parked vehicle.
      */
     private void buildTabs(int srcW, int srcH) {
         sxTab = new int[OUT_W];
@@ -429,20 +525,6 @@ public final class MirrorSource {
             Log.i(TAG, "四宫格取景 side=" + side + " ROI=" + x0 + "," + y0
                     + " " + rw + "x" + rh + " src=" + srcW + "x" + srcH
                     + " zoom=" + zoom + " pan=" + panX + "," + panY);
-        } else if (crop) {
-            // 兜底：相机流仍是 360 三分屏，从左右侧栏取 16:9 子窗口等比放大。
-            int colW = Math.round(srcW * 0.31f);       // ≈397，正好一栏宽
-            int colH = Math.round(colW * 9f / 16f);    // ≈223，16:9 不拉伸
-            if (colH > srcH) {
-                colH = srcH;
-                colW = Math.round(colH * 16f / 9f);
-            }
-            x0 = (side == 2) ? (srcW - colW) : 0;     // 2 = 右灯
-            y0 = (srcH - colH) / 2;
-            rw = colW;
-            rh = colH;
-            Log.i(TAG, "三分屏侧视裁切 side=" + side + " ROI=" + x0 + "," + y0
-                    + " " + rw + "x" + rh + " src=" + srcW + "x" + srcH);
         }
 
         for (int x = 0; x < OUT_W; x++) {

@@ -1,6 +1,6 @@
-# P7 仪表助手 · 源码（v2.14.0 · 打灯影像版）
+# P7 仪表助手 · 源码（v2.17.5 · 打灯影像版）
 
-小鹏 P7 车机 App + 仪表端守护进程。本包是 v2.14.0 的完整源码，对应 APK：`P7仪表助手_v2.14.0.apk`。
+小鹏 P7 车机 App + 仪表端守护进程。本包是 v2.17.5 的完整源码，对应 APK：`P7仪表助手_v2.17.5.apk`。
 
 ---
 
@@ -64,7 +64,7 @@ sh build-mac.sh
 
 流程与 `build.sh` 相同，工具路径无 `.exe` 后缀、JDK 走 `Contents/Home`。两者签名都使用 `tools/testkey`（AOSP testkey）；Windows 即使生成了 `carpad/p7.keystore`，签名也不使用它。SDK 默认取 `~/Library/Android/sdk`，可用 `ANDROID_SDK_ROOT` 覆盖。
 
-两条脚本产出的文件名都是 `P7仪表助手-原生版.apk`；对外发布时重命名为 `P7仪表助手_v<版本>_充电视频版.apk`（与本文标题、首段一致）。`dist/` 目录由脚本自动创建。
+两条脚本产出的文件名都是 `P7仪表助手-原生版.apk`；对外发布时重命名为 `P7仪表助手_v<版本>.apk`（与本文标题、首段一致）。`dist/` 目录由脚本自动创建。
 
 版本号唯一来源是 `carpad/AndroidManifest.xml` 的 `android:versionName/versionCode`。两个APK脚本均先用 `tools/build_version.py` 快照manifest并强制重新编译仪表（需 Go 1.23.4，可用 GO 指定编译器），通过 `-X main.appVersion` 注入同一versionName。AAPT2只读该快照，不再保留fallback版本参数。打包覆盖旧预编译p7assist及旧脚本，签名前后都核对APK版本和内嵌仪表hash，验证通过才替换dist成品；任一步失败停止，不回退打包旧资产。仪表固定使用已有随包 ARM 二进制的 Go 1.23.4 工具链，并禁用自动工具链切换；升级 Go 前须另行验证目标内核兼容性。这不是实车兼容验证。此变化不会自动修改版本号。
 
@@ -89,6 +89,11 @@ python3 tools/build_version.py prepare --out /tmp/p7-instrument-build
 不要手动复制这种二进制或旧tracked assets进行发版。版本匹配仍由现有
 `checkClusterVersion` 的versionName相等判断决定：与APK版本不等时驻车触发上传，
 成功采用同版本新构建后停止重复推送。这里没有改动FTP升级安全机制。
+
+### 相机主机回归
+
+从仓库根目录执行 `sh tests/run-camera-tests.sh`（需要 Python 3、JDK）。
+测试覆盖授权状态、反射参数/返回值、模式门控与 Camera2 延迟回调；Android fake 不是实车 HAL。
 
 ---
 
@@ -200,8 +205,8 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
    影像区固定 960×540：打左灯占左半屏 `x 0–960`、打右灯占右半屏 `x 960–1920`，纵向 `y 60–600`
    （顶部让出档位条、底部让出电量/续航/时间，960:540 严格 16:9 不拉伸）。
 
-   车机把画面**预先缩放到 960×540 并转成 RGB565**，zstd 压缩后经 TCP（默认 `:9002`）推过来；
-   仪表只做 `解压 → 整行 memmove 进 fb1`，零缩放、零像素格式转换。
+   车机把画面**预先缩放到 640×360 并转成 RGB565**，以 raw 帧经 TCP（默认 `:9002`）推过来；
+   仪表将其最近邻放大到 960×540 后写入 fb1，兼容已有 960×540/压缩帧协议。
    反过来（JPEG/H.264）都不可行：仪表 JPEG 软解实测约 20M 像素/s，960×540 一帧 26ms，
    只够 6~10fps 还要吃满一个核；链路又只有 92Mbps，裸 565 跑 15fps 需要 15MB/s。
 
@@ -233,28 +238,29 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
    配置在 `config.json` 的 `video` 段：`{"enable": true, "port": 9002}`。
    **默认关闭**，且字段缺失按关闭处理——影像会盖住半屏，不能像 `popupHide` 那样"缺失即开"。
 
-   车机端取哪一路视野（`carpad/.../AvmMode.java` + `MirrorSource.java`）：
-   - 车机把 AVM 合成画面当**一路虚拟相机**（cameraId=0 / `video51`）暴露，不是四路独立物理相机；
-     打灯要的侧后广角靠切 `display-mode=8`（2×2 四宫格）再裁象限拿到。
-   - **切不到鱼眼有两层根因（V5.10.0.8814 真机实测，对照能出鱼眼的 P7打灯转向辅助 v1.46）**，
-     缺一不可：
-     1. **只写裸 `display-mode` —— 千万别补配套字段**：v1.46 下发原文就是
-        `params =display-mode=8`，紧接着 `XpCameraCmdController: setAvmControlMode()` 被触发、
-        打印 `displaymode:8, Overlaywkst:-1,...`（配套全 -1=未设），随后 connect camera 0
-        出四路鱼眼。反之补齐 `overlay-workst/out-mode/transbody` 等字段时，controller 的
-        `setAvmControlMode()` 根本不被调用，视角停在三分屏——**"参数不完整被丢弃"是错判，
-        多写字段才是毒药**。`AvmMode` 现刻意只写裸字段，普通 `set` 优先、`earlyset` 兜底。
-     2. **下发与取流必须同源（cameraId 一致）**：`display-mode=8` 只作用于 cameraId=0
-        那一路流（真机 logcat `setCmdControlParameters ... cameraId =0`）。若打灯取流打开的是
-        cameraId=1，四宫格根本不在这路上，表现为「下发成功但画面不变」。原仓库同样是
-        「下发 0 + openCamera ids[0]=video51」，且注明 ids[1]/video52 画面会缺一块。现在
-        `mirrorAvm` 打开时强制用 camera 0 取流，避免左右灯分设 0/1 导致右灯取错路。
-     下发成功即按四宫格裁（左灯左下格、右灯右下格），失败退回三分屏侧栏 ROI。
-     排查手法：`adb logcat` 里搜 `XpCameraCmdController`——有 `setAvmControlMode()` 就是
-     controller 真生效了；只有 `CameraService: setCmdControlParameters` 而没这行，就是
-     下发的字段让 controller 拒绝了。
-     调试口：`am broadcast -f 0x01000000 -a com.xiaopeng.clusterassist.AVM --ei mode 8
-     --ez dump true`（`-f` 是前台广播标志，否则被后台执行限制拦掉）。
+   车机端授权与视野选择（`MainActivity` / `AvmMode` / `MirrorSource`）：
+   - **首次启用即在 APK 内申请相机权限**：在「显示内容 → 打灯影像」打开开关，允许系统相机授权后才保存启用。
+     拒绝时关闭开关并提示；系统不再弹框时可由 APP 引导打开本应用权限设置，返回后重新检查。
+     取消设置、取消请求或关闭页面不能偷偷启用。无需外部 `adb pm grant`，已有授权继续有效。
+   - **左右灯使用同一路 AVM 合成流**：四路鱼眼并非左右各开一个独立相机。
+     鱼眼模式使用命令通道 0；相机列表含 `0` 时打开 `0`，使用 `video51` 等命名时打开第一路（沿用参考实现的映射）。
+     左灯取四宫格左下、右灯取右下，再应用各侧取景参数。关闭鱼眼模式才使用手动相机 ID，并原样推整幅流；
+     手动 ID 不存在则停止，不再悄悄换成另一相机。
+   - **主动选视角，而不是沿用上次 360/倒车画面**：每次启动采集发送仅含 `display-mode=8` 的参数，
+     避免带入参数对象里的历史配套字段；相机 `onOpened` 后再次发送，覆盖开流前命令未生效的情况。
+     普通反射调用正常返回只代表下发；返回拒绝、读回未见模式 8、参数接口缺失时不启动四宫格推帧，
+     不把未知画面错裁成侧视。读回通过后还有 250ms 丢帧稳定期；采集中每 200ms 检查一次参数模式，变化即停止。
+   - **单相机所有者与退出**：Camera2 操作在进程唯一 owner 线程串行化；停止立即失效旧回调，
+     迟到的 `onOpened`/`onConfigured` 只关闭旧资源。上一设备未收到 `onClosed` 不允许新设备打开，超时保持不可用。
+     异步打开/配置超过 3 秒即失效，但未关闭设备的所有权仍保留。同侧失败间隔 2 秒重试，累计 3 次后须灭灯再触发。
+     已知倒挡优先于未知灯信号退出；倒挡、关闭功能/主开关、服务销毁均撤销已排队的旧还原，不写回旧视角。
+     普通灭灯仅在已知进入前模式、原厂让位标记未变化且参数仍为四宫格时单次尝试恢复，不猜测默认模式 21。
+     无法由模式读回识别仍使用模式 8 的外部接管，亦不保证还原命令被 HAL 应用。
+   - **参考依据与边界**：对照 [P7_ViewAssist 的相机生命周期修复分支](https://github.com/zgaiss/P7_ViewAssist/tree/75028c228c0101070b9967dcecc05d8bd846472e)
+     的权限入口、普通 vendor set、Camera2 同源取流和过期回调隔离原则；参考分支不使用 early API，也未验证实时像素视角。
+     本实现正常采集不依赖猜测的 early API。`getCmdControlParameters` 读回可能是参数缓存，**模式 8 不是光学内容正确的证明**。
+     主机 fake 测试和 APK 构建不能替代实车验收；若固件不支持可靠读回，功能会停止而非降级显示可疑侧视。
+     HAL 永久不回 `onClosed` 时有意保留所有权并停止重开；同步 vendor/CameraManager 调用若阻塞 owner，线程内超时器也无法打断。
    - **取景偏向车尾（APP 内可调）**：四宫格每格默认整格=该侧完整鱼眼。真机调定「放大 2 倍
      突出车尾、舍弃车头」：右灯窗口右移 `panx=+0.8`、左灯因鱼眼镜像取 `-0.8`，各存一套不共用。
      **调节入口**：APP「显示」页 →「取景微调（放大车尾，舍弃车头）」区：
@@ -267,8 +273,7 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
      com.xiaopeng.clusterassist.AVM --ei side 2 --ef zoom 2.0 --ef panx 0.8 --ef pany 0`
      （`side` 0=左右都设/1=左/2=右；`--ef zoom 0` 复位整格）。注意广播只改本次进程内存、
      不写盘，重启后以 APP 存的值为准。
-   - 参数对象的 `getAvmDisplayMode()`/`flatten()` 在本车抛异常，读回只能直读内部
-     `LinkedHashMap mMap` 的 `display-mode` 键（`AvmMode.current()` 已按 getter→flatten→mMap 三级兜底）。
+   - 参数读回按 getter → flatten → 内部 `mMap` 兼容不同固件；失败会记录原因，但不视为当前画面已确认。
 
 ---
 
@@ -279,9 +284,10 @@ charge.pack ──FTP──▶        ├ 解码线程：JPEG → RGB888，双�
 ```
 README.md          本文
 AGENTS.md          协作规则（Issue / PR / README 同步 / 自查，改动前必读）
-build-all.sh       一键构建（自动适配 macOS / Windows）：测试 → 交叉编译 → 拷入 assets → 打 APK
+build-all.sh       一键构建（自动适配 macOS / Windows）：测试 → 暂存目录交叉编译 → 打 APK
 carpad/            车机 Android App
 instrument/        仪表端 Go 守护进程
+tests/             相机授权、AVM 参数与 Camera2 生命周期主机回归
 tools/             addzip.py、gen_bgmap.py、仪表诊断脚本（icrpc/icrpc_put/probe_card）与 testkey/
 .gitignore         忽略 dist/、carpad/build/、字体、工具链
 ```
@@ -292,6 +298,9 @@ tools/             addzip.py、gen_bgmap.py、仪表诊断脚本（icrpc/icrpc_p
 carpad/
   src/com/xiaopeng/clusterassist/
     MainActivity.java      设置界面（含「充电模式 · 测试版」）
+    CameraPermissionState.java  相机授权/设置返回状态机
+    AvmMode.java MirrorAvmSession.java  厂商视角下发与会话门控
+    MirrorSource.java MirrorPush.java  Camera2 采集与仪表推流
     PushService.java       常驻推送：ext.json/配置/充电资源/投帧兜底
     Deploy.java            FTP 部署与状态读取
     ChargeAnim.java        逐帧投屏（仪表缺播放器时的回落通道）
@@ -331,7 +340,10 @@ instrument/
 - `get_host_icm_charging_duration` 返回 `[-1,0,0]`，充电时长不可用。
 - 电池温度/充电口温度在部分桩上返回 0 且 `cellOK/portOK=false`。
 - 仪表固件升级后属性名/枚举可能变化，需重新标定（App 内「充电数据自检 → 查看充电原始数据」可以导出原始值）。
-- 打灯影像一期只到约 15fps（受主循环 50ms 节拍与 zstd 软解限制），二期换 `/dev/mxc_vpu` 硬解才能上 30fps。
+- 打灯影像当前目标 20fps（640×360 raw），实际帧率取决于车机采集、链路与仪表主循环；不承诺 30fps。
+- 相机为厂商共享资源，本次修复尚未在目标实车完成视角/退出验收；参数读回不能确认实际像素，普通模式恢复只是有条件尝试。
+  请在驻车、可恢复条件下检查：上次 360/倒车后左右灯真实视野、快速换侧、倒挡抢占、松灯还原；
+  拒绝/永久拒绝/设置返回授权，快速开关及服务重启后无迟到回调复活。无把握时保持影像关闭，勿以此替代后视镜。
 - 影像功能需要车机端主动推流；车机没推时仪表侧完全静默，`video.enable=true` 也不会多占 CPU。
 
 ### 仪表端部署约束（真机踩出来的，别绕）

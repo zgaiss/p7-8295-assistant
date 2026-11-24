@@ -159,13 +159,11 @@ public class PushService extends Service {
     private long prefsReloadAt;
     private long xuiRetryAt;
 
-    // AVM 视角切换：display-mode 决定相机流的内容（默认是 360 俯视+前视拼接，
-    // 切成四宫格才是四路鱼眼）。avmPrev 记住进入前的视角，松灯后原样还回去，
-    // 避免把车机的环视视角留在四宫格上。
-    private static final int AVM_SETTLE_MS = 250;
     private android.hardware.camera2.CameraManager camMgr;
-    private int avmPrev = -1;
-    private boolean avmApplied;
+    private long mirrorRetryAt;
+    private int mirrorRetrySide, mirrorFailures;
+    private boolean mirrorUsingAvm;
+    private int mirrorCamera;
 
     private final Runnable mirrorTick = new Runnable() {
         @Override public void run() {
@@ -180,19 +178,19 @@ public class PushService extends Service {
 
     private void mirrorStep() {
         if (prefs == null) return;
-        // prefs 本身是 doPush（10 秒一轮）里才重新加载的，镜像轮询 200ms 一拍却一直在看旧对象：
-        // 用户在设置页刚打开开关，要等最多 10 秒才生效，很容易被当成"开关没作用"。
-        // 开关处于关闭态时顺手重载一次（每秒最多一次），打开后 1 秒内就能起效。
+        // Permission results and switch changes must not wait for the 10s FTP tick.
+        long reloadNow = android.os.SystemClock.elapsedRealtime();
+        if (reloadNow - prefsReloadAt >= 1000) {
+            prefsReloadAt = reloadNow;
+            prefs = Prefs.load(this);
+        }
         if (!prefs.master || !prefs.mirror) {
-            long t = System.currentTimeMillis();
-            if (t - prefsReloadAt >= 1000) {
-                prefsReloadAt = t;
-                prefs = Prefs.load(this);
-            }
-            if (!prefs.master || !prefs.mirror) {
-                stopMirror(true);
-                return;
-            }
+            // Disabling may coincide with native reverse takeover; do not restore old mode.
+            MirrorSource.yieldToNative();
+            stopMirror(true, false);
+            mirrorFailures = 0;
+            mirrorRetrySide = 0;
+            return;
         }
         long nowMs = System.currentTimeMillis();
         // XUI 订阅失败（车机没起来 / 服务还没就绪）时 5 秒重试一次，不影响 200ms 主轮询节拍
@@ -228,11 +226,16 @@ public class PushService extends Service {
                     + " err=" + (xui ? XuiLight.lastError() : CarBridge.lastError()));
         }
 
-        // 任一方向读不到就保持现状：把"未知"当成"灭"会让画面在信号抖动时反复开关，
-        // 而反复开关相机才是真正会打断原厂 AVM 的动作。
-        if (l == null || r == null) return;
+        // A known reverse signal overrides even unknown turn-light values.
         boolean rev = xui ? XuiLight.isReverse() : (gear != null && gear == CarBridge.GEAR_REVERSE);
-
+        if (rev) {
+            MirrorSource.yieldToNative(); // Also cancels restores queued by a previously detached source.
+            stopMirror(false, false); // Native reverse view owns the mode now.
+            mirrorRetrySide = 0;
+            mirrorFailures = 0;
+            return;
+        }
+        if (l == null || r == null) return;
         int side = 0;
         // 双闪（两边同时亮）不触发，与原厂「打灯联动」语义一致
         if (!rev && l != null && r != null && l && r) {
@@ -243,122 +246,64 @@ public class PushService extends Service {
             side = 2;
         }
 
-        if (side == mirrorSide) return;
         if (side == 0) {
             stopMirror(false);
+            mirrorRetrySide = 0;
+            mirrorFailures = 0;
             return;
         }
+        if (mirrorRetrySide != side) {
+            mirrorRetrySide = side;
+            mirrorFailures = 0;
+            mirrorRetryAt = 0;
+        }
+        if (mirrorSrc != null && mirrorSrc.isStopped()) {
+            Log.w("P7Mirror", "采集停止: " + mirrorSrc.lastError());
+            stopMirror(false);
+            mirrorFailures++;
+            mirrorRetryAt = android.os.SystemClock.elapsedRealtime() + 2000;
+        }
+        int camera = prefs.mirrorAvm ? 0 : (side == 1 ? prefs.mirrorCamL : prefs.mirrorCamR);
+        if (side == mirrorSide && mirrorUsingAvm == prefs.mirrorAvm && mirrorCamera == camera) return;
+        if (mirrorFailures >= 3 || android.os.SystemClock.elapsedRealtime() < mirrorRetryAt) return;
         startMirror(side);
     }
 
     private void startMirror(int side) {
         if (checkSelfPermission(android.Manifest.permission.CAMERA)
                 != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            stopMirror(false);
             if (!mirrorPermWarned) {
                 mirrorPermWarned = true;
-                Log.w("P7Mirror", "缺少 CAMERA 权限，影像不启动（adb shell pm grant 可补）");
+                Log.w("P7Mirror", "缺少 CAMERA 权限，请在 APP 内开启打灯影像并允许相机权限");
             }
             return;
         }
-        // AVM 四宫格与取流必须同源：AvmMode 的 display-mode 固定下发到 cameraId=0
-        // （真机 logcat: setCmdControlParameters ... cameraId =0 params =display-mode=8）。
-        // 原仓库同样是「下发 0 + openCamera ids[0]=video51」。之前左右灯分别用
-        // mirrorCamL=0 / mirrorCamR=1，右灯取 video52(camera 1) 时四宫格根本不作用在
-        // 这一路，表现为「下发成功但画面不变」。故只要开了 AVM，一律用 camera 0 取流。
-        // 没开 AVM 时保留老配置（三分屏侧栏 ROI 路径），避免影响既有行为。
-        // 取景参数以 Prefs 为唯一真相源：进程冷启动后 MirrorSource 静态字段还是代码默认值，
-        // 打灯时现读一次恢复用户在 APP 里调好的 zoom/pan（APP 步进改参数时也会实时改静态字段）。
-        MirrorSource.applyFromPrefs(Prefs.load(this));
+        MirrorSource.applyFromPrefs(prefs);
+        // AVM controls the composed stream, not separate left/right camera IDs.
         final int cam = prefs.mirrorAvm ? 0 : (side == 1 ? prefs.mirrorCamL : prefs.mirrorCamR);
-        // 先停旧源：换侧要换相机，旧的不放手新的打不开（HAL 是独占的）
-        if (mirrorSrc != null) {
-            mirrorSrc.stop();
-            mirrorSrc = null;
-        }
+        if (mirrorSrc != null) mirrorSrc.stop();
         if (mirrorPush == null) mirrorPush = new MirrorPush();
         if (!mirrorPush.isRunning()) mirrorPush.start(prefs.host, prefs.mirrorPort);
         mirrorSide = side;
+        mirrorUsingAvm = prefs.mirrorAvm;
+        mirrorCamera = cam;
         mirrorPermWarned = false;
-
-        // AVM 视角必须在打开相机之前下发：相机流的内容由 display-mode 决定，
-        // 开完相机再切就还是旧视角（表现为"切了没反应"）。
-        boolean avm = prefs.mirrorAvm && applyAvm();
-        if (!avm) {
-            openMirror(cam, side);
-            return;
-        }
-        // 车机切换视角是异步的，给它一点时间再开相机，否则拿到的仍是旧模式的流。
-        handler.postDelayed(new Runnable() {
-            @Override public void run() {
-                if (mirrorSide == side && mirrorSrc == null) openMirror(cam, side);
-            }
-        }, AVM_SETTLE_MS);
-    }
-
-    private void openMirror(int cam, int side) {
-        // avmApplied=true 表示四宫格已成功下发，相机流是 2×2 鱼眼 → 按象限裁；
-        // 否则退回三分屏侧栏 ROI。crop 参数在两种模式下都要求"裁出该侧视野"。
-        boolean crop = prefs.mirrorAvm;
-        boolean quad = crop && avmApplied;
-        mirrorSrc = new MirrorSource(this, cam, side, crop, quad, mirrorPush);
+        // Source owns command/open/readback/session/close in one serialized lifecycle.
+        // A dispatch boolean or a fixed delay must never select a quad crop alone.
+        mirrorSrc = new MirrorSource(this, cam, side, prefs.mirrorAvm, mirrorPush);
         mirrorSrc.start();
-        Log.i("P7Mirror", "打灯 " + (side == 1 ? "左" : "右") + "：相机 id=" + cam
-                + " 裁切=" + crop + " 四宫格=" + quad + " 视角now=" + AvmMode.current(camMgr));
+        Log.i("P7Mirror", "打灯 " + side + " camera=" + cam + " AVM=" + prefs.mirrorAvm);
     }
 
-    /**
-     * 打开相机之前预置 AVM 四宫格视角。
-     *
-     * <p>真机定位结论（V5.10.0.8814，对照能出鱼眼的 P7打灯转向辅助 v1.46）：
-     * 切不到鱼眼的根因是「补齐了原厂那套配套字段」——overlay-workst/out-mode/
-     * transbody 一起写时，相机服务的 XpCameraCmdController.setAvmControlMode()
-     * 根本不被触发，视角停在 360 三分屏。v1.46 只写裸 display-mode=8，controller
-     * 立即应用（displaymode:8, 配套字段全 -1），随后开 camera 0 出四路鱼眼。
-     * 所以 AvmMode 现在刻意只写裸字段；这里普通 set 优先、early 兜底。</p>
-     *
-     * <p>无论下发是否成功，MirrorSource 都能工作：四宫格生效就按象限裁，没生效
-     * 就退回三分屏侧栏 ROI。两条路都不依赖这里一定成功。</p>
-     */
-    private boolean applyAvm() {
-        if (camMgr == null) {
-            camMgr = (android.hardware.camera2.CameraManager)
-                    getSystemService(Context.CAMERA_SERVICE);
-        }
-        if (camMgr == null) return false;
-        if (avmApplied) return true;
-        if (avmPrev < 0) avmPrev = AvmMode.current(camMgr);
-        // 裸 display-mode 下发（对齐 v1.46 成功链路）；失败再退 early
-        boolean ok = AvmMode.set(camMgr, AvmMode.MODE_QUAD);
-        if (!ok) ok = AvmMode.earlySet(camMgr, AvmMode.MODE_QUAD);
-        avmApplied = ok;
-        int nowMode = AvmMode.current(camMgr);
-        Log.i("P7Mirror", "AVM: 预置四宫格 " + (ok ? "已下发" : "失败")
-                + " prev=" + avmPrev + " now=" + nowMode
-                + " readBack=" + AvmMode.readBack(camMgr)
-                + " err=" + AvmMode.lastError());
-        return ok;
-    }
+    private void stopMirror(boolean closeSocket) { stopMirror(closeSocket, true); }
 
-    /** 松灯后把视角还回去；没成功切过就不用还。 */
-    private void restoreAvm() {
-        if (!avmApplied) return;
-        avmApplied = false;
-        int back = avmPrev > 0 ? avmPrev : AvmMode.MODE_360;
-        // 还原同样只写裸 display-mode（与 v1.46 成功链路一致）
-        boolean ok = AvmMode.set(camMgr, back);
-        if (!ok) ok = AvmMode.earlySet(camMgr, back);
-        Log.i("P7Mirror", "AVM: 还原 display-mode=" + back + (ok ? " 成功" : " 失败")
-                + " now=" + AvmMode.current(camMgr) + " err=" + AvmMode.lastError());
-        avmPrev = -1;
-    }
-
-    private void stopMirror(boolean closeSocket) {
+    private void stopMirror(boolean closeSocket, boolean restoreMode) {
         if (mirrorSrc != null) {
-            mirrorSrc.stop();
+            mirrorSrc.stop(restoreMode);
             mirrorSrc = null;
         }
         mirrorSide = 0;
-        restoreAvm();
         if (closeSocket && mirrorPush != null) {
             mirrorPush.stop();
             mirrorPush = null;
@@ -789,7 +734,8 @@ public class PushService extends Service {
         if (handler != null && tick != null) handler.removeCallbacks(tick);
         if (handler != null) handler.removeCallbacks(tlTick);
         if (handler != null) handler.removeCallbacks(mirrorTick);
-        stopMirror(true);
+        MirrorSource.yieldToNative();
+        stopMirror(true, false);
         if (deploy != null) deploy.reset();
         super.onDestroy();
     }

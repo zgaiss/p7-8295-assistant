@@ -42,6 +42,12 @@ import java.util.concurrent.Executors;
  */
 public class MainActivity extends Activity {
 
+    private static final int REQ_MIRROR_CAMERA = 1001;
+    private static final String CAMERA_DENIED = "mirrorCameraDenied";
+    private final CameraPermissionState cameraPermission = new CameraPermissionState();
+    private AlertDialog cameraSettingsDialog;
+    private boolean permissionActivityDestroyed;
+
     private Prefs prefs;
     private Deploy deploy;
     private Ui ui;
@@ -92,18 +98,18 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         prefs = Prefs.load(this);
+        // 兼容旧版已开启影像但没有授权的配置：先落盘关闭，绝不把未授权的开启态推给服务。
+        boolean restoreMirror = prefs.mirror && !hasCameraPermission();
+        if (restoreMirror) {
+            prefs.mirror = false;
+            prefs.save(this);
+        }
         deploy = new Deploy(this, prefs);
         ui = new Ui(this);
         buildUi();
         selectPage(0);
         if (prefs.bridge && prefs.master) PushService.start(this);
-        // 打灯影像要用相机：targetSdk 28 必须运行时授权，否则采集端只会在日志里报缺权限
-        if (prefs.mirror && checkSelfPermission(android.Manifest.permission.CAMERA)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            try {
-                requestPermissions(new String[]{android.Manifest.permission.CAMERA}, 1001);
-            } catch (Throwable ignored) { }
-        }
+        if (restoreMirror) requestMirrorEnable();
         main.postDelayed(new Runnable() {
             @Override public void run() { testConnection(false); }
         }, 350);
@@ -129,6 +135,154 @@ public class MainActivity extends Activity {
                 main.postDelayed(this, 30000);
             }
         }, 30000);
+    }
+
+    private boolean permissionActivityAlive() {
+        return !permissionActivityDestroyed && !isFinishing() && !isDestroyed();
+    }
+
+    private boolean hasCameraPermission() {
+        return checkSelfPermission(android.Manifest.permission.CAMERA)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean cameraPermanentlyDenied() {
+        // 首次请求前 shouldShow... 也为 false，必须结合真实拒绝记录；取消请求不算拒绝。
+        return getSharedPreferences(Prefs.SP, MODE_PRIVATE).getBoolean(CAMERA_DENIED, false)
+                && !shouldShowRequestPermissionRationale(android.Manifest.permission.CAMERA);
+    }
+
+    private void requestMirrorEnable() {
+        if (!permissionActivityAlive()) return;
+        if (swMirror != null) swMirror.setCheckedSilently(prefs.mirror);
+        handleCameraAction(cameraPermission.enable(hasCameraPermission(), cameraPermanentlyDenied()));
+    }
+
+    private void applyMirrorEnabled(boolean enabled) {
+        if (!permissionActivityAlive()) return;
+        // 即使异步回调返回了允许，也再核对当前权限（设置/系统策略可能已经撤销）。
+        if (enabled && !hasCameraPermission()) {
+            cameraPermission.disable();
+            enabled = false;
+            toast("相机权限未授予，打灯影像保持关闭");
+        }
+        prefs.mirror = enabled;
+        prefs.save(this);
+        if (swMirror != null) swMirror.setCheckedSilently(enabled);
+        if (enabled && prefs.bridge && prefs.master) PushService.start(this);
+        schedulePush(120, false);
+    }
+
+    private void handleCameraAction(CameraPermissionState.Action action) {
+        if (!permissionActivityAlive()) return;
+        switch (action) {
+            case ENABLE:
+                applyMirrorEnabled(true);
+                if (prefs.mirror) toast("打灯影像已开启");
+                break;
+            case REQUEST:
+                try {
+                    requestPermissions(new String[]{android.Manifest.permission.CAMERA}, REQ_MIRROR_CAMERA);
+                } catch (RuntimeException e) {
+                    cameraPermission.permissionResult(false, false);
+                    toast("无法请求相机权限，打灯影像保持关闭；请在应用设置中授权");
+                }
+                break;
+            case SETTINGS:
+                showCameraSettingsDialog();
+                break;
+            case DENIED:
+                if (swMirror != null) swMirror.setCheckedSilently(false);
+                toast("未授予相机权限，打灯影像保持关闭；可再次开启重试");
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void showCameraSettingsDialog() {
+        dismissCameraSettingsDialog();
+        if (swMirror != null) swMirror.setCheckedSilently(false);
+        final int token = cameraPermission.settingsToken();
+        cameraSettingsDialog = new AlertDialog.Builder(this)
+                .setTitle("需要相机权限")
+                .setMessage("相机权限已被拒绝且系统不再弹出授权框。请在本应用设置 → 权限中允许相机；授权返回后才会开启打灯影像。取消则保持关闭。")
+                .setPositiveButton("前往应用设置", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        if (!permissionActivityAlive() || !cameraPermission.openSettings(token)) return;
+                        try {
+                            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    android.net.Uri.parse("package:" + getPackageName())));
+                        } catch (RuntimeException e) {
+                            cameraPermission.disable();
+                            toast("无法打开应用设置，请手动为本应用允许相机权限后重新开启影像");
+                        }
+                    }
+                })
+                .setNegativeButton("取消", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        cameraPermission.cancelSettings(token);
+                    }
+                })
+                .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                    @Override public void onCancel(DialogInterface dialog) {
+                        cameraPermission.cancelSettings(token);
+                    }
+                }).create();
+        cameraSettingsDialog.show();
+    }
+
+    private void dismissCameraSettingsDialog() {
+        if (cameraSettingsDialog != null) {
+            cameraSettingsDialog.dismiss();
+            cameraSettingsDialog = null;
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_MIRROR_CAMERA || !permissionActivityAlive()) return;
+        int index = -1;
+        if (permissions != null) {
+            for (int i = 0; i < permissions.length; i++) {
+                if (android.Manifest.permission.CAMERA.equals(permissions[i])) { index = i; break; }
+            }
+        }
+        boolean hasResult = index >= 0 && grantResults != null && index < grantResults.length;
+        boolean granted = hasResult
+                && grantResults[index] == android.content.pm.PackageManager.PERMISSION_GRANTED
+                && hasCameraPermission();
+        if (hasResult) {
+            getSharedPreferences(Prefs.SP, MODE_PRIVATE).edit()
+                    .putBoolean(CAMERA_DENIED, !granted).apply();
+        }
+        handleCameraAction(cameraPermission.permissionResult(granted,
+                hasResult && !granted && cameraPermanentlyDenied()));
+    }
+
+    @Override
+    protected void onPause() {
+        cameraPermission.paused();
+        super.onPause();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (prefs == null || !permissionActivityAlive()) return;
+        boolean granted = hasCameraPermission();
+        // 设置中授权后清掉拒绝记忆：以后系统撤权时仍可先尝试标准授权框。
+        if (granted) getSharedPreferences(Prefs.SP, MODE_PRIVATE).edit()
+                .putBoolean(CAMERA_DENIED, false).apply();
+        if (prefs.mirror && !granted) {
+            cameraPermission.disable();
+            applyMirrorEnabled(false);
+            toast("相机权限已撤销，打灯影像已关闭");
+        }
+        // 仅消费当前实例明确打开设置、实际离开并返回的那一次意图。
+        // 取消对话框、关闭影像、销毁或仅从后台回来，都不能因后来授权而自行开启。
+        handleCameraAction(cameraPermission.resumed(granted));
     }
 
     /** 刷新「本地ADB授权」卡片：文字 + 按状态着色（绿=已授权，橙=等待确认，红=未授权） */
@@ -573,19 +727,30 @@ public class MainActivity extends Activity {
 
         // 打灯影像：把该侧相机画面推到仪表半屏（960×540）。默认关——它会盖住半屏。
         p.addView(ui.group("打灯影像（推到仪表半屏）"));
-        LinearLayout r7 = toggle("打灯影像", "960×540",
+        // 授权是异步事务，不能复用 toggle() 的 Setter 后无条件 save/push。
+        LinearLayout r7 = ui.toggleItem("打灯影像", "960×540",
                 "打左/右转向灯时，把该侧相机画面推到仪表左/右半屏；松灯约 1 秒后自动撤区。\n"
-                        + "倒挡、双闪不触发。需要仪表端 2.14.0+ 且车机已授予相机权限。",
-                prefs.mirror,
-                new Setter() { @Override public void set(boolean v) { prefs.mirror = v; } });
+                        + "倒挡、双闪不触发。需要仪表端 2.14.0+；首次开启会请求相机权限。",
+                prefs.mirror, new PillSwitch.OnChange() {
+                    @Override public void onChanged(PillSwitch sw, boolean checked) {
+                        if (syncing || !permissionActivityAlive()) return;
+                        if (checked) {
+                            requestMirrorEnable();
+                        } else {
+                            cameraPermission.disable();
+                            dismissCameraSettingsDialog();
+                            applyMirrorEnabled(false);
+                        }
+                    }
+                });
         swMirror = (PillSwitch) r7.getTag();
         p.addView(r7);
 
         // 视角来源：车机把 AVM 合成画面当一路相机暴露出来，默认是 360 俯视 + 前视。
         // 打灯要看的是侧后方广角，所以默认切到四路鱼眼四宫格再裁对应象限。
         LinearLayout r8 = toggle("鱼眼视角", "四路鱼眼",
-                "开：打灯时把 AVM 切到四路鱼眼四宫格，取该侧广角视野，松灯自动还原。\n"
-                        + "关：直接用 AVM 默认的 360 俯视 + 前视拼接画面。",
+                "开：请求四路鱼眼并检查参数模式，未确认则不推流；松灯有条件尝试还原，倒挡优先让位。\n"
+                        + "关：不切换视角，原样显示下方手动相机流。首次使用须驻车确认真实左右视野。",
                 prefs.mirrorAvm,
                 new Setter() { @Override public void set(boolean v) { prefs.mirrorAvm = v; } });
         p.addView(r8);
@@ -609,7 +774,7 @@ public class MainActivity extends Activity {
                 });
         tvMirrorCamR = (TextView) mcR.getTag();
         p.addView(mcR);
-        p.addView(ui.hint("相机 id 在 0~7 之间循环。哪一路是左后/右后因车而异，打灯实测着调"));
+        p.addView(ui.hint("仅关闭鱼眼视角时使用手动 id（0~7）；开启鱼眼时左右灯共用 AVM 合成流。请驻车标定，勿行驶中调试"));
 
         buildQuadCropUi(p);
 
@@ -2457,6 +2622,9 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        permissionActivityDestroyed = true;
+        cameraPermission.destroy();
+        dismissCameraSettingsDialog();
         super.onDestroy();
         // recreate() 换昼夜配色时，旧实例的循环任务必须停掉：
         // 否则 refreshAdbAuth / 连接自检还挂在旧对象上继续跑。
