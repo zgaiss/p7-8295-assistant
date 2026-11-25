@@ -22,8 +22,10 @@ import java.lang.reflect.Method;
  * 的第一参数就是车辆属性号（0x21401c17 左 / 0x21401c18 右），第二参数 1/0 以 480ms 翻转，
  * 即转向灯闪烁状态。</p>
  *
- * <p>关键点：转向灯在闪，所以「灭」事件不代表关灯。这里只记录「最近一次亮」的时刻，
- * 由 {@link #HOLD_MS} 决定灯是否仍然亮着——否则镜像会跟着闪光每 480ms 开关一次。</p>
+ * <p>关键点：转向灯在闪，所以「灭」事件不代表关灯。判定「仍在这个方向」交给
+ * {@link TurnLamp}：亮、灭都算相变、保持 800ms，既不会被 480ms 的灭相骗成熄灯，
+ * 也能在拨杆回位后 ~0.8s 内撤区（原实现只记「最近一次亮」并保持 1600ms，
+ * 回位的那次灭事件不算数，要多等 1.1s 才停相机）。</p>
  */
 public class XuiLight {
     private static final String TAG = "P7XuiLight";
@@ -47,12 +49,9 @@ public class XuiLight {
      *  2026-11-24 实车挂挡核对为 P=4 / R=3 / N=2 / D=1；早期把编码方向写反会把倒挡当成普通挡。 */
     public static final int GEAR_REVERSE = 3;
 
-    /** 转向灯闪烁周期约 960ms（亮 480 / 灭 480）。窗口取 1.6s：能跨过一个「灭」的空档，
-     *  又能在真熄灯后 1.6s 内撤区，不会让画面赖在屏幕上。 */
-    private static final long HOLD_MS = 1600;
+    /** 相变窗口与两侧状态由纯逻辑类持有，主机可单测；这里只做事件入口。 */
+    private static final TurnLamp LAMP = new TurnLamp();
 
-    private static volatile long leftOnAt;
-    private static volatile long rightOnAt;
     private static volatile int gear = -1;
     private static volatile boolean ready;
     private static volatile String lastErr = "未启动";
@@ -85,8 +84,7 @@ public class XuiLight {
         // 进程退出时 binder 自然断开。这里只把状态清掉，避免残留「亮」被误判。
         ready = false;
         lastErr = "已停止";
-        leftOnAt = 0;
-        rightOnAt = 0;
+        LAMP.reset();
         gear = -1;
     }
 
@@ -110,12 +108,13 @@ public class XuiLight {
         return gear == GEAR_REVERSE;
     }
 
+    /** 该侧拨杆是否仍在打（含闪光的灭相），窗口见 {@link TurnLamp#ACTIVE_MS}。 */
     public static boolean isLeftOn() {
-        return ready && SystemClock.elapsedRealtime() - leftOnAt < HOLD_MS;
+        return ready && LAMP.active(TurnLamp.LEFT, SystemClock.elapsedRealtime());
     }
 
     public static boolean isRightOn() {
-        return ready && SystemClock.elapsedRealtime() - rightOnAt < HOLD_MS;
+        return ready && LAMP.active(TurnLamp.RIGHT, SystemClock.elapsedRealtime());
     }
 
     private static boolean fail(String why) {
@@ -183,11 +182,10 @@ public class XuiLight {
                     if (code == E_LIGHT) {
                         int id = data.readInt();
                         int on = data.readInt();
-                        if (on != 0) {
-                            long now = SystemClock.elapsedRealtime();
-                            if (id == ID_TURN_LEFT) leftOnAt = now;
-                            else if (id == ID_TURN_RIGHT) rightOnAt = now;
-                        }
+                        int side = id == ID_TURN_LEFT ? TurnLamp.LEFT
+                                : id == ID_TURN_RIGHT ? TurnLamp.RIGHT : 0;
+                        // 亮、灭都喂给 TurnLamp：灭相是正常闪烁的一部分，不是熄灯。
+                        LAMP.event(side, on != 0, SystemClock.elapsedRealtime());
                         events++;
                     } else if (code == E_GEAR) {
                         gear = data.readInt();

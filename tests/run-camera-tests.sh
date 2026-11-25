@@ -7,6 +7,7 @@ python3 tests/permission_run_host_tests.py
 python3 tests/avm_run_host_tests.py
 python3 tests/mirror_camera_run_host_tests.py
 python3 tests/mirror_gate_run_host_tests.py
+python3 tests/turn_lamp_run_host_tests.py
 python3 tests/mirror_overlay_run_host_tests.py
 python3 - <<'PY'
 import pathlib, subprocess, tempfile
